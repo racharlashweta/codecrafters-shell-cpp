@@ -28,24 +28,19 @@ struct Job {
 std::vector<Job> job_list;
 std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
-// --- REAPING LOGIC FOR PROMPT ---
-// This is used BEFORE the prompt to catch jobs that finished during/after commands.
+// --- REAPING LOGIC ---
 void reap_finished_jobs() {
     std::vector<Job> active_jobs;
     for (size_t i = 0; i < job_list.size(); ++i) {
         int status;
         if (waitpid(job_list[i].pid, &status, WNOHANG) > 0) {
-            char marker = ' ';
-            if (i == job_list.size() - 1) marker = '+';
-            else if (i == job_list.size() - 2) marker = '-';
-
+            char marker = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
             std::string cmd = job_list[i].command;
             size_t amp = cmd.find_last_of('&');
             if (amp != std::string::npos) {
                 cmd.erase(amp);
                 cmd.erase(cmd.find_last_not_of(" \t") + 1);
             }
-
             std::cout << "[" << job_list[i].id << "]" << marker << "  " 
                       << std::left << std::setw(24) << "Done" << cmd << std::endl;
         } else {
@@ -55,28 +50,24 @@ void reap_finished_jobs() {
     job_list = active_jobs;
 }
 
-// --- TOKENIZER & PATH UTILS ---
+// --- UTILS ---
 std::vector<std::string> parse_arguments(const std::string& input) {
     std::vector<std::string> args;
     std::string current;
-    bool in_s_quote = false, in_d_quote = false;
+    bool in_s = false, in_d = false;
     for (size_t i = 0; i < input.length(); ++i) {
         char c = input[i];
-        if (c == '\\' && !in_s_quote && !in_d_quote) {
-            if (i + 1 < input.length()) current += input[++i];
-            continue;
-        }
-        if (c == '\\' && in_d_quote) {
+        if (c == '\\' && !in_s && !in_d) { if (i + 1 < input.length()) current += input[++i]; continue; }
+        if (c == '\\' && in_d) {
             if (i + 1 < input.length() && (input[i+1] == '\"' || input[i+1] == '\\' || input[i+1] == '$'))
                 { current += input[++i]; }
             else current += c;
             continue;
         }
-        if (c == '\'' && !in_d_quote) in_s_quote = !in_s_quote;
-        else if (c == '\"' && !in_s_quote) in_d_quote = !in_d_quote;
-        else if (c == ' ' && !in_s_quote && !in_d_quote) {
-            if (!current.empty()) { args.push_back(current); current.clear(); }
-        } else current += c;
+        if (c == '\'' && !in_d) in_s = !in_s;
+        else if (c == '\"' && !in_s) in_d = !in_d;
+        else if (c == ' ' && !in_s && !in_d) { if (!current.empty()) { args.push_back(current); current.clear(); } }
+        else current += c;
     }
     if (!current.empty()) args.push_back(current);
     return args;
@@ -95,14 +86,60 @@ std::string get_full_path(std::string cmd) {
     return "";
 }
 
+// --- COMPLETION LOGIC ---
+std::set<std::string> get_all_matches(const std::string& prefix) {
+    std::set<std::string> matches;
+    for (const auto& b : builtins_list) if (b.find(prefix) == 0) matches.insert(b);
+    char* path_env = std::getenv("PATH");
+    if (path_env) {
+        std::stringstream ss(path_env);
+        std::string dir;
+        while (std::getline(ss, dir, ':')) {
+            if (!fs::exists(dir)) continue;
+            for (const auto& entry : fs::directory_iterator(dir)) {
+                std::string name = entry.path().filename().string();
+                if (name.find(prefix) == 0) matches.insert(name);
+            }
+        }
+    }
+    return matches;
+}
+
+char* command_generator(const char* text, int state) {
+    static std::vector<std::string> matches;
+    static size_t idx;
+    if (!state) {
+        std::set<std::string> m_set = get_all_matches(text);
+        matches.assign(m_set.begin(), m_set.end());
+        idx = 0;
+    }
+    if (idx < matches.size()) return strdup(matches[idx++].c_str());
+    return nullptr;
+}
+
+char** my_completion(const char* text, int start, int end) {
+    rl_attempted_completion_over = 1;
+    if (start == 0) {
+        std::set<std::string> m_set = get_all_matches(text);
+        if (m_set.empty()) { rl_ding(); return nullptr; }
+        
+        // If multiple matches exist, don't append space yet (allows for LCP completion)
+        if (m_set.size() > 1) rl_completion_append_character = '\0';
+        else rl_completion_append_character = ' ';
+        
+        return rl_completion_matches(text, command_generator);
+    }
+    return rl_completion_matches(text, rl_filename_completion_function);
+}
+
 // --- MAIN ---
 int main() {
     std::cout << std::unitbuf;
+    rl_attempted_completion_function = my_completion;
     int next_job_id = 1;
 
     while (true) {
-        reap_finished_jobs(); // Reap before printing prompt
-
+        reap_finished_jobs();
         char* line = readline("$ ");
         if (!line) break;
         std::string input(line);
@@ -112,11 +149,10 @@ int main() {
         std::vector<std::string> args = parse_arguments(input);
         if (args.empty()) { free(line); continue; }
 
-        bool is_background = (args.back() == "&");
+        bool is_bg = (args.back() == "&");
         std::string raw_cmd = input;
-        if (is_background) args.pop_back();
+        if (is_bg) args.pop_back();
 
-        // Redirection
         std::string out_f = "", err_f = "";
         bool out_app = false, err_app = false;
         std::vector<std::string> cmd_args;
@@ -132,10 +168,8 @@ int main() {
         std::string command = cmd_args[0];
 
         if (command == "exit") { free(line); return 0; }
-        
         else if (command == "jobs") {
-            // UNIFIED JOBS LOGIC: Check status then print in order
-            std::vector<Job> updated_list;
+            std::vector<Job> updated;
             for (size_t i = 0; i < job_list.size(); ++i) {
                 int status;
                 if (job_list[i].status == "Running" && waitpid(job_list[i].pid, &status, WNOHANG) > 0) {
@@ -146,33 +180,16 @@ int main() {
                         job_list[i].command.erase(job_list[i].command.find_last_not_of(" \t") + 1);
                     }
                 }
-
-                char marker = ' ';
-                if (i == job_list.size() - 1) marker = '+';
-                else if (i == job_list.size() - 2) marker = '-';
-
+                char marker = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
                 std::cout << "[" << job_list[i].id << "]" << marker << "  " 
-                          << std::left << std::setw(24) << job_list[i].status 
-                          << job_list[i].command << std::endl;
-
-                if (job_list[i].status == "Running") updated_list.push_back(job_list[i]);
+                          << std::left << std::setw(24) << job_list[i].status << job_list[i].command << std::endl;
+                if (job_list[i].status == "Running") updated.push_back(job_list[i]);
             }
-            job_list = updated_list;
+            job_list = updated;
         }
         else if (command == "echo") {
-            for (size_t i = 1; i < cmd_args.size(); ++i) 
-                std::cout << cmd_args[i] << (i == cmd_args.size()-1 ? "" : " ");
+            for (size_t i = 1; i < cmd_args.size(); ++i) std::cout << cmd_args[i] << (i == cmd_args.size()-1 ? "" : " ");
             std::cout << std::endl;
-        }
-        else if (command == "type") {
-            std::string target = cmd_args[1];
-            if (std::find(builtins_list.begin(), builtins_list.end(), target) != builtins_list.end())
-                std::cout << target << " is a shell builtin" << std::endl;
-            else {
-                std::string p = get_full_path(target);
-                if (!p.empty()) std::cout << target << " is " << p << std::endl;
-                else std::cout << target << ": not found" << std::endl;
-            }
         }
         else if (command == "pwd") { std::cout << fs::current_path().string() << std::endl; }
         else if (command == "cd") {
@@ -200,7 +217,7 @@ int main() {
                     execvp(c_args[0], c_args.data());
                     exit(1);
                 } else {
-                    if (is_background) {
+                    if (is_bg) {
                         std::cout << "[" << next_job_id << "] " << pid << std::endl;
                         job_list.push_back({next_job_id++, pid, raw_cmd, "Running"});
                     } else waitpid(pid, nullptr, 0);
