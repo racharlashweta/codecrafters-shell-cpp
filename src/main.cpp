@@ -8,11 +8,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <fstream> // Fixed: Added this for std::ofstream
+#include <fstream>
 
 namespace fs = std::filesystem;
 
-// --- TOKENIZER: Handles ', ", and \ ---
+// Tokenizer handles ', ", and \ (Same as before)
 std::vector<std::string> parse_arguments(const std::string& input) {
     std::vector<std::string> args;
     std::string current_arg;
@@ -29,28 +29,16 @@ std::vector<std::string> parse_arguments(const std::string& input) {
             if (i + 1 < input.length()) {
                 char next = input[i + 1];
                 if (next == '\"' || next == '\\' || next == '$') {
-                    current_arg += next;
-                    i++;
-                } else {
-                    current_arg += c;
-                }
-            } else {
-                current_arg += c;
-            }
+                    current_arg += next; i++;
+                } else current_arg += c;
+            } else current_arg += c;
             continue;
         }
-        if (c == '\'' && !in_double_quotes) {
-            in_single_quotes = !in_single_quotes;
-        } else if (c == '\"' && !in_single_quotes) {
-            in_double_quotes = !in_double_quotes;
-        } else if (c == ' ' && !in_single_quotes && !in_double_quotes) {
-            if (!current_arg.empty()) {
-                args.push_back(current_arg);
-                current_arg.clear();
-            }
-        } else {
-            current_arg += c;
-        }
+        if (c == '\'' && !in_double_quotes) in_single_quotes = !in_single_quotes;
+        else if (c == '\"' && !in_single_quotes) in_double_quotes = !in_double_quotes;
+        else if (c == ' ' && !in_single_quotes && !in_double_quotes) {
+            if (!current_arg.empty()) { args.push_back(current_arg); current_arg.clear(); }
+        } else current_arg += c;
     }
     if (!current_arg.empty()) args.push_back(current_arg);
     return args;
@@ -63,10 +51,7 @@ std::string get_path(std::string command) {
     std::string path_dir;
     while (std::getline(ss, path_dir, ':')) {
         fs::path p = fs::path(path_dir) / command;
-        if (fs::exists(p)) {
-            auto perms = fs::status(p).permissions();
-            if ((perms & fs::perms::owner_exec) != fs::perms::none) return p.string();
-        }
+        if (fs::exists(p)) return p.string();
     }
     return "";
 }
@@ -74,7 +59,6 @@ std::string get_path(std::string command) {
 int main() {
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
-
     std::set<std::string> builtins = {"exit", "echo", "type", "pwd", "cd"};
 
     while (true) {
@@ -85,13 +69,21 @@ int main() {
         std::vector<std::string> args = parse_arguments(input);
         if (args.empty()) continue;
 
-        // Parse Redirection
-        std::string redirect_file = "";
+        // --- NEW: REDIRECTION PARSING ---
+        std::string stdout_file = "";
+        std::string stderr_file = "";
         int redirect_idx = -1;
+
         for (int i = 0; i < (int)args.size(); ++i) {
             if (args[i] == ">" || args[i] == "1>") {
                 if (i + 1 < (int)args.size()) {
-                    redirect_file = args[i + 1];
+                    stdout_file = args[i + 1];
+                    redirect_idx = i;
+                    break;
+                }
+            } else if (args[i] == "2>") {
+                if (i + 1 < (int)args.size()) {
+                    stderr_file = args[i + 1];
                     redirect_idx = i;
                     break;
                 }
@@ -105,33 +97,33 @@ int main() {
 
         std::string command = cmd_args[0];
 
-        if (command == "exit") {
-            return 0;
-        } else if (command == "echo") {
-            std::streambuf* old_cout = nullptr;
-            std::ofstream out_file;
-            if (!redirect_file.empty()) {
-                out_file.open(redirect_file);
-                old_cout = std::cout.rdbuf(out_file.rdbuf());
+        // Builtins (Simple check for redirection)
+        if (command == "exit") return 0;
+        else if (command == "echo") {
+            std::ostream* out = &std::cout;
+            std::ofstream file_out;
+            if (!stdout_file.empty()) {
+                file_out.open(stdout_file);
+                out = &file_out;
             }
             for (size_t i = 1; i < cmd_args.size(); ++i) {
-                std::cout << cmd_args[i] << (i == cmd_args.size() - 1 ? "" : " ");
+                *out << cmd_args[i] << (i == cmd_args.size() - 1 ? "" : " ");
             }
-            std::cout << "\n";
-            if (old_cout) std::cout.rdbuf(old_cout);
-        } else if (command == "pwd") {
-            if (!redirect_file.empty()) {
-                std::ofstream out(redirect_file);
+            *out << "\n";
+        }
+        else if (command == "pwd") {
+            if (!stdout_file.empty()) {
+                std::ofstream out(stdout_file);
                 out << fs::current_path().string() << "\n";
-            } else {
-                std::cout << fs::current_path().string() << "\n";
-            }
-        } else if (command == "cd") {
+            } else std::cout << fs::current_path().string() << "\n";
+        }
+        else if (command == "cd") {
             std::string path = cmd_args.size() > 1 ? cmd_args[1] : "";
             if (path == "~") path = std::getenv("HOME");
             if (fs::exists(path) && fs::is_directory(path)) fs::current_path(path);
             else std::cout << "cd: " << path << ": No such file or directory\n";
-        } else if (command == "type") {
+        }
+        else if (command == "type") {
             std::string target = cmd_args[1];
             if (builtins.count(target)) std::cout << target << " is a shell builtin\n";
             else {
@@ -139,14 +131,21 @@ int main() {
                 if (!p.empty()) std::cout << target << " is " << p << "\n";
                 else std::cout << target << ": not found\n";
             }
-        } else {
+        } 
+        // --- EXTERNAL PROGRAMS ---
+        else {
             std::string full_path = get_path(command);
             if (!full_path.empty()) {
                 pid_t pid = fork();
-                if (pid == 0) {
-                    if (!redirect_file.empty()) {
-                        int fd = open(redirect_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (pid == 0) { // Child
+                    if (!stdout_file.empty()) {
+                        int fd = open(stdout_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
                         dup2(fd, STDOUT_FILENO);
+                        close(fd);
+                    }
+                    if (!stderr_file.empty()) {
+                        int fd = open(stderr_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                        dup2(fd, STDERR_FILENO); // Point Stderr (2) to file
                         close(fd);
                     }
                     std::vector<char*> c_args;
@@ -154,12 +153,8 @@ int main() {
                     c_args.push_back(nullptr);
                     execvp(c_args[0], c_args.data());
                     exit(1);
-                } else {
-                    wait(nullptr);
-                }
-            } else {
-                std::cout << command << ": command not found\n";
-            }
+                } else wait(nullptr);
+            } else std::cout << command << ": command not found\n";
         }
     }
     return 0;
