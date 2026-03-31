@@ -8,17 +8,15 @@
 
 namespace fs = std::filesystem;
 
-// Helper to find executable in PATH
+// Keep your get_path function here...
 std::string get_path(std::string command) {
     char* path_env = std::getenv("PATH");
     if (!path_env) return "";
-
     std::stringstream ss(path_env);
     std::string path;
     while (std::getline(ss, path, ':')) {
         fs::path full_path = fs::path(path) / command;
         if (fs::exists(full_path)) {
-            // Check for execute permission
             auto perms = fs::status(full_path).permissions();
             if ((perms & fs::perms::owner_exec) != fs::perms::none) {
                 return full_path.string();
@@ -32,7 +30,8 @@ int main() {
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
-    std::set<std::string> builtins = {"exit", "echo", "type"};
+    // Update your builtin list
+    std::set<std::string> builtins = {"exit", "echo", "type", "pwd"};
 
     while (true) {
         std::cout << "$ " << std::flush;
@@ -50,6 +49,10 @@ int main() {
         else if (command == "echo") {
             std::cout << argument << "\n";
         } 
+        // NEW: Handle the pwd builtin
+        else if (command == "pwd") {
+            std::cout << fs::current_path().string() << "\n";
+        }
         else if (command == "type") {
             if (builtins.count(argument)) {
                 std::cout << argument << " is a shell builtin" << std::endl;
@@ -62,11 +65,9 @@ int main() {
                 }
             }
         } 
-        // NEW: Handle external programs
         else {
             std::string full_path = get_path(command);
             if (!full_path.empty()) {
-                // Run the program using the full input string (command + args)
                 std::system(input.c_str());
             } else {
                 std::cout << command << ": command not found" << std::endl;
