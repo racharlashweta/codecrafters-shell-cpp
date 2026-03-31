@@ -3,24 +3,20 @@
 #include <vector>
 #include <set>
 #include <sstream>
-#include <filesystem> // For checking files
-#include <cstdlib>    // For getenv
+#include <filesystem>
+#include <cstdlib>
 
 namespace fs = std::filesystem;
 
-// Helper function to find a command in the PATH
+// Helper to find executable in PATH
 std::string get_path(std::string command) {
     char* path_env = std::getenv("PATH");
     if (!path_env) return "";
 
     std::stringstream ss(path_env);
     std::string path;
-    
-    // Split PATH by ':'
     while (std::getline(ss, path, ':')) {
         fs::path full_path = fs::path(path) / command;
-        
-        // Check if file exists and is executable
         if (fs::exists(full_path)) {
             // Check for execute permission
             auto perms = fs::status(full_path).permissions();
@@ -39,7 +35,8 @@ int main() {
     std::set<std::string> builtins = {"exit", "echo", "type"};
 
     while (true) {
-        std::cout << "$ ";
+        std::cout << "$ " << std::flush;
+
         std::string input;
         if (!std::getline(std::cin, input)) break;
 
@@ -57,7 +54,6 @@ int main() {
             if (builtins.count(argument)) {
                 std::cout << argument << " is a shell builtin" << std::endl;
             } else {
-                // NEW: Search the PATH for the executable
                 std::string path = get_path(argument);
                 if (!path.empty()) {
                     std::cout << argument << " is " << path << std::endl;
@@ -66,8 +62,15 @@ int main() {
                 }
             }
         } 
+        // NEW: Handle external programs
         else {
-            std::cout << command << ": command not found" << std::endl;
+            std::string full_path = get_path(command);
+            if (!full_path.empty()) {
+                // Run the program using the full input string (command + args)
+                std::system(input.c_str());
+            } else {
+                std::cout << command << ": command not found" << std::endl;
+            }
         }
     }
     return 0;
