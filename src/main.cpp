@@ -28,43 +28,34 @@ struct Job {
 std::vector<Job> job_list;
 std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
-// --- REAPING LOGIC ---
-// This function checks for finished processes, prints them as "Done", 
-// and removes them from the active job list.
+// --- REAPING LOGIC FOR PROMPT ---
+// This is used BEFORE the prompt to catch jobs that finished during/after commands.
 void reap_finished_jobs() {
     std::vector<Job> active_jobs;
     for (size_t i = 0; i < job_list.size(); ++i) {
         int status;
-        pid_t res = waitpid(job_list[i].pid, &status, WNOHANG);
-
-        if (res > 0) { // Process has exited
-            // Determine marker based on current position in the full list
+        if (waitpid(job_list[i].pid, &status, WNOHANG) > 0) {
             char marker = ' ';
             if (i == job_list.size() - 1) marker = '+';
             else if (i == job_list.size() - 2) marker = '-';
 
-            // Clean command string for "Done" output (remove trailing &)
-            std::string display_cmd = job_list[i].command;
-            size_t amp = display_cmd.find_last_of('&');
+            std::string cmd = job_list[i].command;
+            size_t amp = cmd.find_last_of('&');
             if (amp != std::string::npos) {
-                display_cmd.erase(amp);
-                display_cmd.erase(display_cmd.find_last_not_of(" \t\n\r\f\v") + 1);
+                cmd.erase(amp);
+                cmd.erase(cmd.find_last_not_of(" \t") + 1);
             }
 
             std::cout << "[" << job_list[i].id << "]" << marker << "  " 
-                      << std::left << std::setw(24) << "Done" 
-                      << display_cmd << std::endl;
-            
-            // Job is NOT added to active_jobs, so it is reaped/removed.
+                      << std::left << std::setw(24) << "Done" << cmd << std::endl;
         } else {
-            // Process is still running or hasn't changed state
             active_jobs.push_back(job_list[i]);
         }
     }
     job_list = active_jobs;
 }
 
-// --- TOKENIZER & UTILS ---
+// --- TOKENIZER & PATH UTILS ---
 std::vector<std::string> parse_arguments(const std::string& input) {
     std::vector<std::string> args;
     std::string current;
@@ -76,11 +67,9 @@ std::vector<std::string> parse_arguments(const std::string& input) {
             continue;
         }
         if (c == '\\' && in_d_quote) {
-            if (i + 1 < input.length()) {
-                char n = input[i+1];
-                if (n == '\"' || n == '\\' || n == '$') { current += n; i++; }
-                else current += c;
-            } else current += c;
+            if (i + 1 < input.length() && (input[i+1] == '\"' || input[i+1] == '\\' || input[i+1] == '$'))
+                { current += input[++i]; }
+            else current += c;
             continue;
         }
         if (c == '\'' && !in_d_quote) in_s_quote = !in_s_quote;
@@ -100,22 +89,19 @@ std::string get_full_path(std::string cmd) {
     std::string dir;
     while (std::getline(ss, dir, ':')) {
         fs::path p = fs::path(dir) / cmd;
-        if (fs::exists(p)) {
-            auto perms = fs::status(p).permissions();
-            if ((perms & fs::perms::owner_exec) != fs::perms::none) return p.string();
-        }
+        if (fs::exists(p) && (fs::status(p).permissions() & fs::perms::owner_exec) != fs::perms::none)
+            return p.string();
     }
     return "";
 }
 
-// --- MAIN LOOP ---
+// --- MAIN ---
 int main() {
     std::cout << std::unitbuf;
     int next_job_id = 1;
 
     while (true) {
-        // CRITICAL: Reap jobs BEFORE drawing the prompt
-        reap_finished_jobs();
+        reap_finished_jobs(); // Reap before printing prompt
 
         char* line = readline("$ ");
         if (!line) break;
@@ -127,10 +113,10 @@ int main() {
         if (args.empty()) { free(line); continue; }
 
         bool is_background = (args.back() == "&");
-        std::string raw_input = input;
+        std::string raw_cmd = input;
         if (is_background) args.pop_back();
 
-        // Redirection Parsing
+        // Redirection
         std::string out_f = "", err_f = "";
         bool out_app = false, err_app = false;
         std::vector<std::string> cmd_args;
@@ -139,27 +125,39 @@ int main() {
             else if (args[i] == ">>" || args[i] == "1>>") { out_f = args[++i]; out_app = true; }
             else if (args[i] == "2>") { err_f = args[++i]; err_app = false; }
             else if (args[i] == "2>>") { err_f = args[++i]; err_app = true; }
-            else { cmd_args.push_back(args[i]); }
+            else cmd_args.push_back(args[i]);
         }
 
+        if (cmd_args.empty()) { free(line); continue; }
         std::string command = cmd_args[0];
 
-        if (command == "exit") {
-            free(line);
-            return 0;
-        }
+        if (command == "exit") { free(line); return 0; }
+        
         else if (command == "jobs") {
-            // Builtin 'jobs' also reaps first to show updated status
-            reap_finished_jobs();
+            // UNIFIED JOBS LOGIC: Check status then print in order
+            std::vector<Job> updated_list;
             for (size_t i = 0; i < job_list.size(); ++i) {
+                int status;
+                if (job_list[i].status == "Running" && waitpid(job_list[i].pid, &status, WNOHANG) > 0) {
+                    job_list[i].status = "Done";
+                    size_t amp = job_list[i].command.find_last_of('&');
+                    if (amp != std::string::npos) {
+                        job_list[i].command.erase(amp);
+                        job_list[i].command.erase(job_list[i].command.find_last_not_of(" \t") + 1);
+                    }
+                }
+
                 char marker = ' ';
                 if (i == job_list.size() - 1) marker = '+';
                 else if (i == job_list.size() - 2) marker = '-';
 
                 std::cout << "[" << job_list[i].id << "]" << marker << "  " 
-                          << std::left << std::setw(24) << "Running" 
+                          << std::left << std::setw(24) << job_list[i].status 
                           << job_list[i].command << std::endl;
+
+                if (job_list[i].status == "Running") updated_list.push_back(job_list[i]);
             }
+            job_list = updated_list;
         }
         else if (command == "echo") {
             for (size_t i = 1; i < cmd_args.size(); ++i) 
@@ -176,9 +174,7 @@ int main() {
                 else std::cout << target << ": not found" << std::endl;
             }
         }
-        else if (command == "pwd") {
-            std::cout << fs::current_path().string() << std::endl;
-        }
+        else if (command == "pwd") { std::cout << fs::current_path().string() << std::endl; }
         else if (command == "cd") {
             std::string path = (cmd_args.size() > 1) ? cmd_args[1] : "";
             if (path == "~") path = std::getenv("HOME");
@@ -190,7 +186,6 @@ int main() {
             if (!full_path.empty()) {
                 pid_t pid = fork();
                 if (pid == 0) {
-                    // Child Redirection
                     if (!out_f.empty()) {
                         int fd = open(out_f.c_str(), O_WRONLY | O_CREAT | (out_app ? O_APPEND : O_TRUNC), 0644);
                         dup2(fd, STDOUT_FILENO); close(fd);
@@ -207,14 +202,10 @@ int main() {
                 } else {
                     if (is_background) {
                         std::cout << "[" << next_job_id << "] " << pid << std::endl;
-                        job_list.push_back({next_job_id++, pid, raw_input, "Running"});
-                    } else {
-                        waitpid(pid, nullptr, 0);
-                    }
+                        job_list.push_back({next_job_id++, pid, raw_cmd, "Running"});
+                    } else waitpid(pid, nullptr, 0);
                 }
-            } else {
-                std::cout << command << ": command not found" << std::endl;
-            }
+            } else std::cout << command << ": command not found" << std::endl;
         }
         free(line);
     }
