@@ -17,6 +17,7 @@
 
 namespace fs = std::filesystem;
 
+// --- DATA STRUCTURES ---
 struct Job {
     int id;
     pid_t pid;
@@ -27,7 +28,7 @@ struct Job {
 std::vector<Job> job_list;
 const std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
-// --- FORMATTING HELPERS ---
+// --- HELPERS ---
 std::string format_cmd_for_display(std::string cmd, std::string status) {
     std::string result = cmd;
     if (status == "Done") {
@@ -76,7 +77,11 @@ char* command_generator(const char* text, int state) {
         matches.clear();
         idx = 0;
         std::string prefix(text);
+
+        // 1. Check Built-ins
         for (const auto& b : builtins_list) if (b.find(prefix) == 0) matches.push_back(b);
+
+        // 2. Check PATH
         char* path_env = std::getenv("PATH");
         if (path_env) {
             std::stringstream ss(path_env);
@@ -91,6 +96,8 @@ char* command_generator(const char* text, int state) {
                 } catch (...) {}
             }
         }
+
+        // 3. Check Current Directory (Crucial for 'du rat/')
         try {
             for (const auto& entry : fs::directory_iterator(".")) {
                 std::string name = entry.path().filename().string();
@@ -100,6 +107,7 @@ char* command_generator(const char* text, int state) {
                 }
             }
         } catch (...) {}
+
         std::sort(matches.begin(), matches.end());
         matches.erase(std::unique(matches.begin(), matches.end()), matches.end());
     }
@@ -109,14 +117,15 @@ char* command_generator(const char* text, int state) {
 
 char** my_completion(const char* text, int start, int end) {
     rl_attempted_completion_over = 1; 
-    rl_completion_append_character = ' '; // Reset to default space
+    rl_completion_append_character = ' '; // Reset to space by default
 
     char** matches = rl_completion_matches(text, command_generator);
 
-    // If it's a unique directory match, suppress the trailing space
+    // FIX FOR #LC6 & #BF8: Unique Directory Match
     if (matches && matches[0] != nullptr && matches[1] == nullptr) {
-        if (std::string(matches[0]).back() == '/') {
-            rl_completion_append_character = '\0';
+        std::string match_str(matches[0]);
+        if (!match_str.empty() && match_str.back() == '/') {
+            rl_completion_append_character = '\0'; // No trailing space for dirs
         }
     }
     return matches;
@@ -202,7 +211,7 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
             execvp(p.c_str(), ca.data()); exit(1);
         } else {
             if (is_bg) { 
-                int id = 1; if(!job_list.empty()) id = job_list.back().id + 1;
+                int id = job_list.empty() ? 1 : job_list.back().id + 1;
                 std::cout << "[" << id << "] " << pid << std::endl; 
                 job_list.push_back({id, pid, raw_input, "Running"}); 
             }
