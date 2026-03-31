@@ -14,15 +14,9 @@
 
 namespace fs = std::filesystem;
 
-// --- UTILS ---
-std::vector<std::string> tokenize(const std::string& s) {
-    std::vector<std::string> tokens;
-    std::stringstream ss(s);
-    std::string word;
-    while (ss >> word) tokens.push_back(word);
-    return tokens;
-}
+const std::vector<std::string> builtins = {"echo", "exit", "type", "pwd", "cd"};
 
+// --- PATH RESOLUTION ---
 std::string get_path(const std::string& cmd) {
     if (cmd.find('/') != std::string::npos) return fs::exists(cmd) ? cmd : "";
     char* env = std::getenv("PATH");
@@ -38,13 +32,51 @@ std::string get_path(const std::string& cmd) {
     return "";
 }
 
-// --- AUTOCOMPLETE (For #LC6) ---
+// --- TOKENIZER ---
+std::vector<std::string> tokenize(const std::string& s) {
+    std::vector<std::string> tokens;
+    std::stringstream ss(s);
+    std::string word;
+    while (ss >> word) tokens.push_back(word);
+    return tokens;
+}
+
+// --- BUILT-IN HANDLER (Critical for #NY9 compliance while solving #XK3) ---
+bool handle_builtin(const std::vector<std::string>& args) {
+    if (args.empty()) return false;
+    std::string cmd = args[0];
+    if (cmd == "echo") {
+        for (size_t i = 1; i < args.size(); ++i) {
+            std::cout << args[i] << (i == args.size() - 1 ? "" : " ");
+        }
+        std::cout << std::endl;
+        return true;
+    } else if (cmd == "type") {
+        if (args.size() < 2) return true;
+        std::string target = args[1];
+        if (std::find(builtins.begin(), builtins.end(), target) != builtins.end()) {
+            std::cout << target << " is a shell builtin" << std::endl;
+        } else {
+            std::string p = get_path(target);
+            if (!p.empty()) std::cout << target << " is " << p << std::endl;
+            else std::cout << target << ": not found" << std::endl;
+        }
+        return true;
+    } else if (cmd == "pwd") {
+        std::cout << fs::current_path().string() << std::endl;
+        return true;
+    }
+    return false;
+}
+
+// --- AUTOCOMPLETE ENGINE ---
 char* generator(const char* text, int state) {
     static std::vector<std::string> matches;
     static size_t idx;
     if (!state) {
         matches.clear(); idx = 0;
         std::string pref(text);
+        for (const auto& b : builtins) if (b.find(pref) == 0) matches.push_back(b);
         try {
             for (const auto& entry : fs::directory_iterator(".")) {
                 std::string name = entry.path().filename().string();
@@ -68,26 +100,7 @@ char** completion(const char* text, int start, int end) {
     return matches;
 }
 
-// --- EXECUTION ---
-void run_command(std::vector<std::string> args) {
-    if (args.empty()) exit(0);
-    // Built-ins inside the child for pipes
-    if (args[0] == "echo") {
-        for (size_t i = 1; i < args.size(); ++i) std::cout << args[i] << (i == args.size()-1 ? "" : " ");
-        std::cout << std::endl; exit(0);
-    }
-    if (args[0] == "pwd") { std::cout << fs::current_path().string() << std::endl; exit(0); }
-
-    std::string full = get_path(args[0]);
-    if (full.empty()) { std::cerr << args[0] << ": command not found" << std::endl; exit(1); }
-    std::vector<char*> c_args;
-    for (auto& a : args) c_args.push_back(const_cast<char*>(a.c_str()));
-    c_args.push_back(nullptr);
-    execvp(full.c_str(), c_args.data());
-    exit(1);
-}
-
-// --- THE PIPELINE ENGINE (Redesigned for 3+ stages) ---
+// --- MULTI-STAGE PIPELINE ENGINE (#XK3) ---
 void run_pipeline(const std::string& line) {
     std::vector<std::string> stages;
     std::stringstream ss(line);
@@ -95,50 +108,55 @@ void run_pipeline(const std::string& line) {
     while (std::getline(ss, seg, '|')) stages.push_back(seg);
 
     int n = stages.size();
-    int in_fd = 0; // Start with STDIN
+    int in_fd = 0; // Read from STDIN initially
     std::vector<pid_t> pids;
 
     for (int i = 0; i < n; i++) {
         int fds[2];
-        if (i < n - 1) {
-            if (pipe(fds) < 0) return;
-        }
+        if (i < n - 1) pipe(fds);
 
         pid_t pid = fork();
         if (pid == 0) {
-            // Child Input
+            // Child: Handle Input Redirection
             if (i > 0) {
                 dup2(in_fd, STDIN_FILENO);
                 close(in_fd);
             }
-            // Child Output
+            // Child: Handle Output Redirection
             if (i < n - 1) {
-                close(fds[0]); // Child doesn't read from its own new pipe
+                close(fds[0]); // Don't need read-end
                 dup2(fds[1], STDOUT_FILENO);
                 close(fds[1]);
             }
-            run_command(tokenize(stages[i]));
-            exit(0);
+            
+            std::vector<std::string> args = tokenize(stages[i]);
+            if (handle_builtin(args)) exit(0);
+
+            std::string full = get_path(args[0]);
+            if (full.empty()) { std::cerr << args[0] << ": command not found" << std::endl; exit(1); }
+            std::vector<char*> ca;
+            for (auto& a : args) ca.push_back(const_cast<char*>(a.c_str()));
+            ca.push_back(nullptr);
+            execvp(full.c_str(), ca.data());
+            exit(1);
         } else {
+            // Parent: Cleanup descriptors
             pids.push_back(pid);
-            // Parent Cleanup
             if (i > 0) close(in_fd); // Close the read-end from the previous stage
             if (i < n - 1) {
-                close(fds[1]); // CRITICAL: Parent MUST close the write-end immediately
-                in_fd = fds[0]; // Keep the read-end for the NEXT stage
+                close(fds[1]); // CRITICAL: Parent MUST close write-end so next child gets EOF
+                in_fd = fds[0]; // Save read-end for next child
             }
         }
     }
 
-    // Wait for all children to finish
+    // Wait for EVERY process in the chain to die
     for (pid_t p : pids) waitpid(p, nullptr, 0);
-    // Explicitly flush to ensure no text is trapped in buffers
-    std::fflush(stdout);
+    std::fflush(stdout); // Clear everything before readline prints the prompt
 }
 
-// --- MAIN ---
 int main() {
-    std::cout << std::unitbuf; // Disable buffering for cout
+    std::cout << std::unitbuf;
     rl_attempted_completion_function = completion;
     rl_basic_word_break_characters = " \t\n\"\\'`@$><=;|&{(";
 
@@ -154,16 +172,21 @@ int main() {
         } else {
             std::vector<std::string> args = tokenize(input);
             if (args.empty()) { free(line); continue; }
-            
-            // Parent-only built-ins
             if (args[0] == "exit") exit(0);
             if (args[0] == "cd") {
                 std::string p = args.size() > 1 ? args[1] : std::getenv("HOME");
                 if (chdir(p.c_str()) != 0) std::cerr << "cd: " << p << ": No such file" << std::endl;
-            } else {
+            } else if (!handle_builtin(args)) {
                 pid_t pid = fork();
-                if (pid == 0) run_command(args);
-                else {
+                if (pid == 0) {
+                    std::string full = get_path(args[0]);
+                    if (full.empty()) { std::cerr << args[0] << ": command not found" << std::endl; exit(1); }
+                    std::vector<char*> ca;
+                    for (auto& a : args) ca.push_back(const_cast<char*>(a.c_str()));
+                    ca.push_back(nullptr);
+                    execvp(full.c_str(), ca.data());
+                    exit(1);
+                } else {
                     waitpid(pid, nullptr, 0);
                     std::fflush(stdout);
                 }
