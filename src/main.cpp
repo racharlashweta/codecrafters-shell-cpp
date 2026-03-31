@@ -19,8 +19,8 @@ namespace fs = std::filesystem;
 
 std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd"};
 
-// --- PATH SCANNER ---
-std::vector<std::string> get_all_matches(const std::string& prefix) {
+// --- COMMAND MATCHING (For the first word) ---
+std::vector<std::string> get_command_matches(const std::string& prefix) {
     std::set<std::string> matches;
     for (const auto& b : builtins_list) {
         if (b.compare(0, prefix.length(), prefix) == 0) matches.insert(b);
@@ -47,12 +47,11 @@ std::vector<std::string> get_all_matches(const std::string& prefix) {
     return std::vector<std::string>(matches.begin(), matches.end());
 }
 
-// --- READLINE GENERATOR ---
 char* command_generator(const char* text, int state) {
     static std::vector<std::string> matches;
     static size_t match_index;
     if (!state) {
-        matches = get_all_matches(text);
+        matches = get_command_matches(text);
         match_index = 0;
     }
     if (match_index < matches.size()) {
@@ -63,37 +62,21 @@ char* command_generator(const char* text, int state) {
     return nullptr;
 }
 
-// --- DISPLAY HOOK (From Stage #WH6) ---
-void display_matches(char** matches, int num_matches, int max_length) {
-    std::cout << "\n";
-    std::vector<std::string> sorted_matches;
-    for (int i = 1; i <= num_matches; ++i) sorted_matches.push_back(matches[i]);
-    std::sort(sorted_matches.begin(), sorted_matches.end());
-    for (size_t i = 0; i < sorted_matches.size(); ++i) {
-        std::cout << sorted_matches[i] << (i == sorted_matches.size() - 1 ? "" : "  ");
-    }
-    std::cout << "\n";
-    rl_on_new_line();
-    rl_redisplay();
-}
-
+// --- UPDATED COMPLETION HOOK ---
 char** my_completion(const char* text, int start, int end) {
+    // If it's the first word, complete commands
     if (start == 0) {
         rl_attempted_completion_over = 1;
-        char** matches = rl_completion_matches(text, command_generator);
-        
-        // If we have more than one match, don't append a space yet
-        if (matches && matches[1] && matches[2]) {
-            rl_completion_append_character = '\0'; 
-        } else {
-            rl_completion_append_character = ' ';
-        }
-        return matches;
-    }
-    return nullptr; 
+        return rl_completion_matches(text, command_generator);
+    } 
+    
+    // Otherwise, complete filenames in the current directory
+    // rl_filename_completion_function is a built-in Readline utility
+    rl_attempted_completion_over = 0; // Let Readline handle filename logic
+    return rl_completion_matches(text, rl_filename_completion_function);
 }
 
-// --- TOKENIZER ---
+// --- TOKENIZER & UTILS ---
 std::vector<std::string> parse_arguments(const std::string& input) {
     std::vector<std::string> args;
     std::string current;
@@ -140,9 +123,9 @@ std::string get_full_path(std::string cmd) {
 int main() {
     std::cout << std::unitbuf;
     rl_attempted_completion_function = my_completion;
-    rl_completion_display_matches_hook = display_matches;
-    rl_variable_bind("show-all-if-ambiguous", "off"); 
-    rl_variable_bind("bell-style", "audible");
+    
+    // Standard shell behavior: append space after a successful completion
+    rl_completion_append_character = ' ';
 
     while (true) {
         char* line = readline("$ ");
@@ -155,7 +138,7 @@ int main() {
         free(line);
         if (args.empty()) continue;
 
-        // --- REDIRECTION PARSING ---
+        // --- REDIRECTION & EXECUTION (Keep your existing logic) ---
         std::string out_f = "", err_f = "";
         bool out_app = false, err_app = false;
         int redirect_idx = -1;
@@ -168,7 +151,6 @@ int main() {
         std::vector<std::string> cmd_args = args;
         if (redirect_idx != -1) cmd_args.erase(cmd_args.begin() + redirect_idx, cmd_args.end());
 
-        // File setup
         if (!out_f.empty()) {
             fs::path p(out_f);
             if (p.has_parent_path()) fs::create_directories(p.parent_path());
