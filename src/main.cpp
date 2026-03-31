@@ -127,35 +127,32 @@ std::vector<std::string> parse_args(const std::string& input) {
     for (size_t i = 0; i < input.length(); ++i) {
         char c = input[i];
 
-        // Handle backslash escaping (not inside single quotes)
+        // Backslash outside of single quotes
         if (c == '\\' && !in_single_quotes) {
             if (i + 1 < input.length()) {
-                char next = input[++i];
-                // In double quotes, \ only escapes certain characters (like \, ", $)
-                // For the purpose of these tests, we handle standard escaping
-                current += next;
+                char next = input[i + 1];
+                if (in_double_quotes) {
+                    // Inside double quotes, \ only escapes specific characters
+                    if (next == '$' || next == '`' || next == '"' || next == '\\' || next == '\n') {
+                        current += next;
+                        i++;
+                    } else {
+                        current += c;
+                    }
+                } else {
+                    // Outside quotes, \ always escapes the next char
+                    current += next;
+                    i++;
+                }
             }
             continue;
         }
 
-        // Toggle double quotes
-        if (c == '"' && !in_single_quotes) {
-            in_double_quotes = !in_double_quotes;
-            continue;
-        }
+        if (c == '"' && !in_single_quotes) { in_double_quotes = !in_double_quotes; continue; }
+        if (c == '\'' && !in_double_quotes) { in_single_quotes = !in_single_quotes; continue; }
 
-        // Toggle single quotes
-        if (c == '\'' && !in_double_quotes) {
-            in_single_quotes = !in_single_quotes;
-            continue;
-        }
-
-        // Split by whitespace only if not inside any quotes
         if (std::isspace(c) && !in_double_quotes && !in_single_quotes) {
-            if (!current.empty()) {
-                args.push_back(current);
-                current.clear();
-            }
+            if (!current.empty()) { args.push_back(current); current.clear(); }
         } else {
             current += c;
         }
@@ -183,9 +180,7 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
             int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
             int fd = open(args[++i].c_str(), flags, 0644);
             if (target == 1) out_fd = fd; else err_fd = fd;
-        } else {
-            clean_args.push_back(args[i]);
-        }
+        } else { clean_args.push_back(args[i]); }
     }
 
     if (clean_args.empty()) return;
@@ -195,27 +190,32 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
     const std::string& cmd = clean_args[0];
 
     if (cmd == "echo") {
-        for (size_t i = 1; i < clean_args.size(); ++i) {
+        for (size_t i = 1; i < clean_args.size(); ++i) 
             std::cout << clean_args[i] << (i == clean_args.size() - 1 ? "" : " ");
-        }
         std::cout << std::endl;
     } 
     else if (cmd == "exit") { exit(0); }
     else if (cmd == "pwd") { std::cout << fs::current_path().string() << std::endl; }
     else if (cmd == "cd") {
-        std::string target = (clean_args.size() > 1) ? clean_args[1] : std::getenv("HOME");
-        if (chdir(target.c_str()) != 0) std::cerr << "cd: " << target << ": No such file or directory" << std::endl;
+        std::string target = (clean_args.size() > 1) ? clean_args[1] : "~";
+        // --- TILDE EXPANSION ---
+        if (target == "~") {
+            char* home = std::getenv("HOME");
+            target = home ? home : "/";
+        } else if (target.find("~/") == 0) {
+            char* home = std::getenv("HOME");
+            target = (home ? std::string(home) : "") + target.substr(1);
+        }
+        if (chdir(target.c_str()) != 0) 
+            std::cerr << "cd: " << clean_args[1] << ": No such file or directory" << std::endl;
     }
     else if (cmd == "jobs") {
-        for (auto& j : job_list) {
-            int s; if (waitpid(j.pid, &s, WNOHANG) > 0) j.status = "Done";
-        }
+        for (auto& j : job_list) { int s; if (waitpid(j.pid, &s, WNOHANG) > 0) j.status = "Done"; }
         for (size_t i = 0; i < job_list.size(); ++i) {
             char m = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
             std::cout << "[" << job_list[i].id << "]" << m << "  " << std::left << std::setw(24) 
                       << job_list[i].status << format_cmd_for_display(job_list[i].command, job_list[i].status) << std::endl;
         }
-        // Cleanup 'Done' jobs from the internal list after showing them
         std::vector<Job> next;
         for (const auto& j : job_list) if (j.status == "Running") next.push_back(j);
         job_list = next;
@@ -248,7 +248,6 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
             } else { waitpid(pid, nullptr, 0); }
         }
     }
-
     dup2(saved_stdout, STDOUT_FILENO); dup2(saved_stderr, STDERR_FILENO);
     close(saved_stdout); close(saved_stderr);
 }
