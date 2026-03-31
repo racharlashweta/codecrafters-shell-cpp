@@ -1,5 +1,4 @@
-cat <<EOF > README.md
-# Custom POSIX-Compliant Shell (C++17) 🐚
+echo "# Custom POSIX-Compliant Shell (C++17) 🐚
 
 A functional Linux shell built from the ground up, designed to handle command execution, process management, and system-level environment resolution.
 
@@ -12,9 +11,4 @@ A functional Linux shell built from the ground up, designed to handle command ex
 ### 🛠 Tech Stack
 * **Language:** C++17
 * **Tools:** CMake, GNU Readline, Linux System Calls
-* **Environment:** Ubuntu 24.04 (via GitHub Codespaces)
-EOF
-
-git add README.md
-git commit -m "docs: update README with professional project summary"
-git push origin main
+* **Environment:** Ubuntu 24.04 (via GitHub Codespaces)" > README.md
