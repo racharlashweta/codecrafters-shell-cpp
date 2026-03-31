@@ -168,6 +168,23 @@ int main() {
         if (cmd_args.empty()) { free(line); continue; }
         const std::string& command = cmd_args[0];
 
+        // --- BUILTIN REDIRECTION WRAPPER ---
+        int original_stdout = -1, original_stderr = -1;
+        bool is_builtin = std::find(builtins_list.begin(), builtins_list.end(), command) != builtins_list.end();
+
+        if (is_builtin) {
+            original_stdout = dup(STDOUT_FILENO);
+            original_stderr = dup(STDERR_FILENO);
+            if (!out_f.empty()) {
+                int fd = open(out_f.c_str(), O_WRONLY | O_CREAT | (out_app ? O_APPEND : O_TRUNC), 0644);
+                if (fd != -1) { dup2(fd, STDOUT_FILENO); close(fd); }
+            }
+            if (!err_f.empty()) {
+                int fd = open(err_f.c_str(), O_WRONLY | O_CREAT | (err_app ? O_APPEND : O_TRUNC), 0644);
+                if (fd != -1) { dup2(fd, STDERR_FILENO); close(fd); }
+            }
+        }
+
         if (command == "exit") { free(line); return 0; }
         else if (command == "jobs") {
             std::vector<Job> updated;
@@ -189,8 +206,7 @@ int main() {
             job_list = updated;
         }
         else if (command == "type") {
-            if (cmd_args.size() < 2) { /* handle error */ }
-            else {
+            if (cmd_args.size() >= 2) {
                 std::string target = cmd_args[1];
                 if (std::find(builtins_list.begin(), builtins_list.end(), target) != builtins_list.end())
                     std::cout << target << " is a shell builtin" << std::endl;
@@ -238,6 +254,17 @@ int main() {
                 }
             } else std::cout << command << ": command not found" << std::endl;
         }
+
+        // --- RESTORE STREAMS FOR BUILTINS ---
+        if (is_builtin) {
+            std::cout.flush();
+            std::cerr.flush();
+            dup2(original_stdout, STDOUT_FILENO);
+            dup2(original_stderr, STDERR_FILENO);
+            close(original_stdout);
+            close(original_stderr);
+        }
+
         free(line);
     }
     return 0;
