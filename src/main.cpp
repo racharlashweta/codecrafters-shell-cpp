@@ -64,7 +64,7 @@ std::string get_full_path(std::string cmd) {
     return "";
 }
 
-// --- COMMAND GENERATOR ---
+// --- COMPLETION GENERATORS & HOOKS ---
 std::vector<std::string> get_command_matches(const std::string& prefix) {
     std::set<std::string> matches;
     for (const auto& b : builtins_list) {
@@ -107,7 +107,6 @@ char* command_generator(const char* text, int state) {
     return nullptr;
 }
 
-// --- DISPLAY HOOK ---
 void custom_display_matches(char** matches, int num_matches, int max_length) {
     std::cout << "\n";
     std::vector<std::string> display_list;
@@ -127,7 +126,6 @@ void custom_display_matches(char** matches, int num_matches, int max_length) {
     rl_redisplay();
 }
 
-// --- COMPLETION HOOK ---
 char** my_completion(const char* text, int start, int end) {
     rl_completion_suppress_append = 0;
     rl_completion_append_character = ' ';
@@ -149,7 +147,6 @@ char** my_completion(const char* text, int start, int end) {
             }
         }
     }
-
     if (!matches || !matches[0]) {
         rl_ding(); 
         return nullptr;
@@ -157,7 +154,7 @@ char** my_completion(const char* text, int start, int end) {
     return matches;
 }
 
-// --- MAIN LOOP ---
+// --- MAIN SHELL LOOP ---
 int main() {
     std::cout << std::unitbuf;
     rl_attempted_completion_function = my_completion;
@@ -179,27 +176,31 @@ int main() {
         // Redirection parsing
         std::string out_f = "", err_f = "";
         bool out_app = false, err_app = false;
-        int redirect_idx = -1;
-        for (int i = 0; i < (int)args.size(); ++i) {
-            if (args[i] == ">" || args[i] == "1>") { out_f = args[i+1]; out_app = false; redirect_idx = i; break; }
-            else if (args[i] == ">>" || args[i] == "1>>") { out_f = args[i+1]; out_app = true; redirect_idx = i; break; }
-            else if (args[i] == "2>") { err_f = args[i+1]; err_app = false; redirect_idx = i; break; }
-            else if (args[i] == "2>>") { err_f = args[i+1]; err_app = true; redirect_idx = i; break; }
-        }
-        std::vector<std::string> cmd_args = args;
-        if (redirect_idx != -1) cmd_args.erase(cmd_args.begin() + redirect_idx, cmd_args.end());
+        std::vector<std::string> cmd_args;
 
-        // File streams setup
+        for (int i = 0; i < (int)args.size(); ++i) {
+            if (args[i] == ">" || args[i] == "1>") { out_f = args[++i]; out_app = false; }
+            else if (args[i] == ">>" || args[i] == "1>>") { out_f = args[++i]; out_app = true; }
+            else if (args[i] == "2>") { err_f = args[++i]; err_app = false; }
+            else if (args[i] == "2>>") { err_f = args[++i]; err_app = true; }
+            else { cmd_args.push_back(args[i]); }
+        }
+
+        // Create/Truncate redirection files immediately
         if (!out_f.empty()) {
             fs::path p(out_f);
             if (p.has_parent_path()) fs::create_directories(p.parent_path());
+            std::ofstream(out_f, out_app ? std::ios::app : std::ios::out).close();
         }
         if (!err_f.empty()) {
             fs::path p(err_f);
             if (p.has_parent_path()) fs::create_directories(p.parent_path());
+            std::ofstream(err_f, err_app ? std::ios::app : std::ios::out).close();
         }
 
+        if (cmd_args.empty()) continue;
         std::string command = cmd_args[0];
+
         if (command == "exit") return 0;
         else if (command == "echo") {
             std::ostream* out = &std::cout;
@@ -210,19 +211,33 @@ int main() {
             }
             for (size_t i = 1; i < cmd_args.size(); ++i) 
                 *out << cmd_args[i] << (i == cmd_args.size() - 1 ? "" : " ");
-            *out << std::endl; 
+            *out << std::endl;
         }
         else if (command == "type") {
+            std::ostream* out = &std::cout;
+            std::ofstream f_out;
+            if (!out_f.empty()) {
+                f_out.open(out_f, out_app ? std::ios::app : std::ios::out);
+                out = &f_out;
+            }
             std::string target = cmd_args[1];
             if (std::find(builtins_list.begin(), builtins_list.end(), target) != builtins_list.end())
-                std::cout << target << " is a shell builtin" << std::endl;
+                *out << target << " is a shell builtin" << std::endl;
             else {
                 std::string p = get_full_path(target);
-                if (!p.empty()) std::cout << target << " is " << p << std::endl;
-                else std::cout << target << ": not found" << std::endl;
+                if (!p.empty()) *out << target << " is " << p << std::endl;
+                else *out << target << ": not found" << std::endl;
             }
         }
-        else if (command == "pwd") std::cout << fs::current_path().string() << std::endl;
+        else if (command == "pwd") {
+            std::ostream* out = &std::cout;
+            std::ofstream f_out;
+            if (!out_f.empty()) {
+                f_out.open(out_f, out_app ? std::ios::app : std::ios::out);
+                out = &f_out;
+            }
+            *out << fs::current_path().string() << std::endl;
+        }
         else if (command == "cd") {
             std::string path = cmd_args.size() > 1 ? cmd_args[1] : "";
             if (path == "~") path = std::getenv("HOME");
