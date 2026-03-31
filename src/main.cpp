@@ -17,18 +17,20 @@
 
 namespace fs = std::filesystem;
 
-// --- DATA STRUCTURES & GLOBALS ---
+// --- DATA STRUCTURES ---
+
 struct Job {
     int id;
     pid_t pid;
     std::string command;
-    std::string status;
+    mutable std::string status; // mutable allows status updates during printing loops
 };
 
 std::vector<Job> job_list;
 const std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
 // --- HELPERS ---
+
 std::string format_cmd_for_display(std::string cmd, std::string status) {
     std::string result = cmd;
     if (status == "Done") {
@@ -72,17 +74,21 @@ void reap_finished_jobs() {
             char marker = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
             std::cout << "[" << job_list[i].id << "]" << marker << "  Done                    " 
                       << format_cmd_for_display(job_list[i].command, "Done") << std::endl;
-        } else { active.push_back(job_list[i]); }
+        } else {
+            active.push_back(job_list[i]);
+        }
     }
     job_list = active;
 }
 
 // --- PARSER ---
+
 std::vector<std::string> parse_args(const std::string& input) {
     std::vector<std::string> args;
     std::string current;
     bool in_double_quotes = false;
     bool in_single_quotes = false;
+
     for (size_t i = 0; i < input.length(); ++i) {
         char c = input[i];
         if (c == '\\' && !in_single_quotes) {
@@ -98,6 +104,7 @@ std::vector<std::string> parse_args(const std::string& input) {
         }
         if (c == '"' && !in_single_quotes) { in_double_quotes = !in_double_quotes; continue; }
         if (c == '\'' && !in_double_quotes) { in_single_quotes = !in_single_quotes; continue; }
+
         if (std::isspace(c) && !in_double_quotes && !in_single_quotes) {
             if (!current.empty()) { args.push_back(current); current.clear(); }
         } else { current += c; }
@@ -107,6 +114,7 @@ std::vector<std::string> parse_args(const std::string& input) {
 }
 
 // --- EXECUTION ---
+
 void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_input) {
     int out_fd = -1, err_fd = -1;
     int saved_stdout = dup(STDOUT_FILENO);
@@ -142,16 +150,29 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
     else if (cmd == "pwd") { std::cout << fs::current_path().string() << std::endl; }
     else if (cmd == "cd") {
         std::string target = (clean_args.size() > 1) ? clean_args[1] : "~";
-        if (target == "~") { char* h = std::getenv("HOME"); target = h ? h : "/"; }
-        else if (target.find("~/") == 0) { char* h = std::getenv("HOME"); target = (h ? std::string(h) : "") + target.substr(1); }
-        if (chdir(target.c_str()) != 0) std::cerr << "cd: " << clean_args[1] << ": No such file or directory" << std::endl;
+        if (target == "~") {
+            char* home = std::getenv("HOME");
+            target = home ? home : "/";
+        } else if (target.find("~/") == 0) {
+            char* home = std::getenv("HOME");
+            target = (home ? std::string(home) : "") + target.substr(1);
+        }
+        if (chdir(target.c_str()) != 0) 
+            std::cerr << "cd: " << (clean_args.size() > 1 ? clean_args[1] : "~") << ": No such file or directory" << std::endl;
     }
     else if (cmd == "jobs") {
-        for (auto& j : job_list) { int s; if (waitpid(j.pid, &s, WNOHANG) > 0) j.status = "Done"; }
+        // --- CRITICAL FIX FOR #MA9 ---
+        // Refresh statuses immediately before printing
+        for (auto& j : job_list) {
+            int status;
+            if (waitpid(j.pid, &status, WNOHANG) > 0) j.status = "Done";
+        }
         for (size_t i = 0; i < job_list.size(); ++i) {
             char m = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
-            std::cout << "[" << job_list[i].id << "]" << m << "  " << std::left << std::setw(24) << job_list[i].status << format_cmd_for_display(job_list[i].command, job_list[i].status) << std::endl;
+            std::cout << "[" << job_list[i].id << "]" << m << "  " << std::left << std::setw(24) 
+                      << job_list[i].status << format_cmd_for_display(job_list[i].command, job_list[i].status) << std::endl;
         }
+        // Purge "Done" jobs so they don't show up again
         std::vector<Job> next;
         for (const auto& j : job_list) if (j.status == "Running") next.push_back(j);
         job_list = next;
@@ -188,7 +209,8 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
     close(saved_stdout); close(saved_stderr);
 }
 
-// --- MAIN LOOP ---
+// --- MAIN ---
+
 int main() {
     std::cout << std::unitbuf;
     while (true) {
@@ -201,20 +223,17 @@ int main() {
         std::string input(line);
         std::vector<std::string> args = parse_args(input);
         
-        // 1. Check for Background Jobs
         bool is_bg = (!args.empty() && args.back() == "&");
         if (is_bg) args.pop_back();
 
-        // 2. Handle Pipelines (Multi-stage)
+        // Handle Pipeline Chunks
         std::vector<std::vector<std::string>> commands;
         std::vector<std::string> current_cmd;
         for (const auto& arg : args) {
             if (arg == "|") {
                 commands.push_back(current_cmd);
                 current_cmd.clear();
-            } else {
-                current_cmd.push_back(arg);
-            }
+            } else { current_cmd.push_back(arg); }
         }
         commands.push_back(current_cmd);
 
@@ -225,34 +244,18 @@ int main() {
 
             for (int i = 0; i < num_cmds; ++i) {
                 int pfd[2];
-                if (i < num_cmds - 1) {
-                    if (pipe(pfd) == -1) { perror("pipe"); break; }
-                }
+                if (i < num_cmds - 1) pipe(pfd);
 
                 pid_t pid = fork();
                 if (pid == 0) {
-                    // If not the first command, take input from the previous pipe
-                    if (prev_pipe_read != -1) {
-                        dup2(prev_pipe_read, STDIN_FILENO);
-                        close(prev_pipe_read);
-                    }
-                    // If not the last command, send output to the current pipe
-                    if (i < num_cmds - 1) {
-                        dup2(pfd[1], STDOUT_FILENO);
-                        close(pfd[0]);
-                        close(pfd[1]);
-                    }
+                    if (prev_pipe_read != -1) { dup2(prev_pipe_read, STDIN_FILENO); close(prev_pipe_read); }
+                    if (i < num_cmds - 1) { dup2(pfd[1], STDOUT_FILENO); close(pfd[0]); close(pfd[1]); }
                     execute_command(commands[i], false, "");
                     exit(0);
                 }
-                
                 pids.push_back(pid);
-                // Parent cleanup
                 if (prev_pipe_read != -1) close(prev_pipe_read);
-                if (i < num_cmds - 1) {
-                    close(pfd[1]);
-                    prev_pipe_read = pfd[0];
-                }
+                if (i < num_cmds - 1) { close(pfd[1]); prev_pipe_read = pfd[0]; }
             }
             for (pid_t pid : pids) waitpid(pid, nullptr, 0);
         } else {
