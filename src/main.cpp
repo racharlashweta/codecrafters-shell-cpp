@@ -9,7 +9,6 @@
 #include <fcntl.h>
 #include <algorithm>
 #include <cstring>
-
 #include <readline/readline.h>
 #include <readline/history.h>
 
@@ -31,13 +30,15 @@ std::string get_path(const std::string& cmd) {
     std::stringstream ss(env);
     std::string dir;
     while (std::getline(ss, dir, ':')) {
-        fs::path p = fs::path(dir) / cmd;
-        if (fs::exists(p)) return p.string();
+        try {
+            fs::path p = fs::path(dir) / cmd;
+            if (fs::exists(p)) return p.string();
+        } catch (...) {}
     }
     return "";
 }
 
-// --- COMPLETION ---
+// --- AUTOCOMPLETE (For #LC6) ---
 char* generator(const char* text, int state) {
     static std::vector<std::string> matches;
     static size_t idx;
@@ -70,11 +71,13 @@ char** completion(const char* text, int start, int end) {
 // --- EXECUTION ---
 void run_command(std::vector<std::string> args) {
     if (args.empty()) exit(0);
+    // Built-ins inside the child for pipes
     if (args[0] == "echo") {
         for (size_t i = 1; i < args.size(); ++i) std::cout << args[i] << (i == args.size()-1 ? "" : " ");
-        std::cout << std::endl;
-        exit(0);
+        std::cout << std::endl; exit(0);
     }
+    if (args[0] == "pwd") { std::cout << fs::current_path().string() << std::endl; exit(0); }
+
     std::string full = get_path(args[0]);
     if (full.empty()) { std::cerr << args[0] << ": command not found" << std::endl; exit(1); }
     std::vector<char*> c_args;
@@ -84,7 +87,7 @@ void run_command(std::vector<std::string> args) {
     exit(1);
 }
 
-// --- THE FIX FOR #XK3 ---
+// --- THE PIPELINE ENGINE (Redesigned for 3+ stages) ---
 void run_pipeline(const std::string& line) {
     std::vector<std::string> stages;
     std::stringstream ss(line);
@@ -92,46 +95,50 @@ void run_pipeline(const std::string& line) {
     while (std::getline(ss, seg, '|')) stages.push_back(seg);
 
     int n = stages.size();
-    int in_fd = STDIN_FILENO; 
+    int in_fd = 0; // Start with STDIN
     std::vector<pid_t> pids;
 
     for (int i = 0; i < n; i++) {
         int fds[2];
-        if (i < n - 1) pipe(fds);
+        if (i < n - 1) {
+            if (pipe(fds) < 0) return;
+        }
 
         pid_t pid = fork();
         if (pid == 0) {
-            // Child: Redirect input from the previous stage
-            if (in_fd != STDIN_FILENO) {
+            // Child Input
+            if (i > 0) {
                 dup2(in_fd, STDIN_FILENO);
                 close(in_fd);
             }
-            // Child: Redirect output to the next stage
+            // Child Output
             if (i < n - 1) {
-                close(fds[0]); // Don't need read end
+                close(fds[0]); // Child doesn't read from its own new pipe
                 dup2(fds[1], STDOUT_FILENO);
                 close(fds[1]);
             }
             run_command(tokenize(stages[i]));
+            exit(0);
         } else {
-            // Parent: Cleanup descriptors
             pids.push_back(pid);
-            if (in_fd != STDIN_FILENO) close(in_fd);
+            // Parent Cleanup
+            if (i > 0) close(in_fd); // Close the read-end from the previous stage
             if (i < n - 1) {
-                close(fds[1]); // Close write end so child gets EOF
-                in_fd = fds[0]; // Save read end for the next child
+                close(fds[1]); // CRITICAL: Parent MUST close the write-end immediately
+                in_fd = fds[0]; // Keep the read-end for the NEXT stage
             }
         }
     }
 
-    // Wait for ALL processes to finish
+    // Wait for all children to finish
     for (pid_t p : pids) waitpid(p, nullptr, 0);
-    // Explicitly flush to ensure everything hits the screen before the prompt
+    // Explicitly flush to ensure no text is trapped in buffers
     std::fflush(stdout);
 }
 
+// --- MAIN ---
 int main() {
-    std::cout << std::unitbuf;
+    std::cout << std::unitbuf; // Disable buffering for cout
     rl_attempted_completion_function = completion;
     rl_basic_word_break_characters = " \t\n\"\\'`@$><=;|&{(";
 
@@ -147,6 +154,8 @@ int main() {
         } else {
             std::vector<std::string> args = tokenize(input);
             if (args.empty()) { free(line); continue; }
+            
+            // Parent-only built-ins
             if (args[0] == "exit") exit(0);
             if (args[0] == "cd") {
                 std::string p = args.size() > 1 ? args[1] : std::getenv("HOME");
@@ -154,7 +163,10 @@ int main() {
             } else {
                 pid_t pid = fork();
                 if (pid == 0) run_command(args);
-                else waitpid(pid, nullptr, 0);
+                else {
+                    waitpid(pid, nullptr, 0);
+                    std::fflush(stdout);
+                }
             }
         }
         free(line);
