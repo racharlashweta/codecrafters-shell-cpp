@@ -27,6 +27,7 @@ struct Job {
 std::vector<Job> job_list;
 const std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
+// --- FORMATTING HELPERS ---
 std::string format_cmd_for_display(std::string cmd, std::string status) {
     std::string result = cmd;
     if (status == "Done") {
@@ -54,14 +55,6 @@ std::string get_full_path(const std::string& cmd) {
     return "";
 }
 
-int get_next_available_id() {
-    std::set<int> ids;
-    for (const auto& j : job_list) ids.insert(j.id);
-    int id = 1;
-    while (ids.count(id)) id++;
-    return id;
-}
-
 void reap_finished_jobs() {
     std::vector<Job> active;
     for (size_t i = 0; i < job_list.size(); ++i) {
@@ -75,6 +68,7 @@ void reap_finished_jobs() {
     job_list = active;
 }
 
+// --- AUTOCOMPLETE ENGINE ---
 char* command_generator(const char* text, int state) {
     static std::vector<std::string> matches;
     static size_t idx;
@@ -115,20 +109,30 @@ char* command_generator(const char* text, int state) {
 
 char** my_completion(const char* text, int start, int end) {
     rl_attempted_completion_over = 1; 
-    return rl_completion_matches(text, command_generator);
+    rl_completion_append_character = ' '; // Reset to default space
+
+    char** matches = rl_completion_matches(text, command_generator);
+
+    // If it's a unique directory match, suppress the trailing space
+    if (matches && matches[0] != nullptr && matches[1] == nullptr) {
+        if (std::string(matches[0]).back() == '/') {
+            rl_completion_append_character = '\0';
+        }
+    }
+    return matches;
 }
 
+// --- PARSER ---
 std::vector<std::string> parse_args(const std::string& input) {
     std::vector<std::string> args;
     std::string current;
-    bool in_double_quotes = false;
-    bool in_single_quotes = false;
+    bool in_double = false, in_single = false;
     for (size_t i = 0; i < input.length(); ++i) {
         char c = input[i];
-        if (c == '\\' && !in_single_quotes) {
+        if (c == '\\' && !in_single) {
             if (i + 1 < input.length()) {
                 char next = input[i + 1];
-                if (in_double_quotes) {
+                if (in_double) {
                     if (next == '$' || next == '`' || next == '"' || next == '\\' || next == '\n') {
                         current += next; i++;
                     } else current += c;
@@ -136,9 +140,9 @@ std::vector<std::string> parse_args(const std::string& input) {
             }
             continue;
         }
-        if (c == '"' && !in_single_quotes) { in_double_quotes = !in_double_quotes; continue; }
-        if (c == '\'' && !in_double_quotes) { in_single_quotes = !in_single_quotes; continue; }
-        if (std::isspace(c) && !in_double_quotes && !in_single_quotes) {
+        if (c == '"' && !in_single) { in_double = !in_double; continue; }
+        if (c == '\'' && !in_double) { in_single = !in_single; continue; }
+        if (std::isspace(c) && !in_double && !in_single) {
             if (!current.empty()) { args.push_back(current); current.clear(); }
         } else current += c;
     }
@@ -146,14 +150,15 @@ std::vector<std::string> parse_args(const std::string& input) {
     return args;
 }
 
+// --- EXECUTION ---
 void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_input) {
     int out_fd = -1, err_fd = -1, saved_out = dup(STDOUT_FILENO), saved_err = dup(STDERR_FILENO);
     std::vector<std::string> clean;
     for (size_t i = 0; i < args.size(); ++i) {
         int target = -1; bool append = false;
-        if (args[i] == ">" || args[i] == "1>") { target = 1; }
+        if (args[i] == ">" || args[i] == "1>") target = 1;
         else if (args[i] == ">>" || args[i] == "1>>") { target = 1; append = true; }
-        else if (args[i] == "2>") { target = 2; }
+        else if (args[i] == "2>") target = 2;
         else if (args[i] == "2>>") { target = 2; append = true; }
 
         if (target != -1 && i + 1 < args.size()) {
@@ -163,6 +168,7 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
         } else clean.push_back(args[i]);
     }
     if (clean.empty()) return;
+
     if (out_fd != -1) { dup2(out_fd, STDOUT_FILENO); close(out_fd); }
     if (err_fd != -1) { dup2(err_fd, STDERR_FILENO); close(err_fd); }
 
@@ -195,7 +201,11 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
             std::vector<char*> ca; for (auto& a : clean) ca.push_back(const_cast<char*>(a.c_str())); ca.push_back(nullptr);
             execvp(p.c_str(), ca.data()); exit(1);
         } else {
-            if (is_bg) { int id = get_next_available_id(); std::cout << "[" << id << "] " << pid << std::endl; job_list.push_back({id, pid, raw_input, "Running"}); }
+            if (is_bg) { 
+                int id = 1; if(!job_list.empty()) id = job_list.back().id + 1;
+                std::cout << "[" << id << "] " << pid << std::endl; 
+                job_list.push_back({id, pid, raw_input, "Running"}); 
+            }
             else waitpid(pid, nullptr, 0);
         }
     }
