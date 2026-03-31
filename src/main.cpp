@@ -62,18 +62,33 @@ char* command_generator(const char* text, int state) {
     return nullptr;
 }
 
-// --- UPDATED COMPLETION HOOK FOR NESTED PATHS ---
+// --- DIRECTORY-AWARE FILENAME COMPLETION ---
 char** my_completion(const char* text, int start, int end) {
-    // start == 0 means we are completing the first word (the command)
     if (start == 0) {
         rl_attempted_completion_over = 1;
+        rl_completion_append_character = ' '; // Commands always get a space
         return rl_completion_matches(text, command_generator);
     } 
-    
-    // For any subsequent words, use the built-in filename completion.
-    // This natively handles nested paths (e.g., path/to/f -> path/to/file.txt)
-    rl_attempted_completion_over = 0; 
-    return rl_completion_matches(text, rl_filename_completion_function);
+
+    rl_attempted_completion_over = 1; 
+    char** matches = rl_completion_matches(text, rl_filename_completion_function);
+
+    if (matches && matches[0]) {
+        // If there's only one match (matches[1] is null), check if it's a directory
+        if (matches[1] == nullptr) {
+            std::string path(matches[0]);
+            // Tilde expansion if necessary (optional for this stage)
+            if (fs::exists(path) && fs::is_directory(path)) {
+                rl_completion_append_character = '/';
+                // Critical: suppress Readline's default space
+                rl_completion_suppress_append = 1; 
+            } else {
+                rl_completion_append_character = ' ';
+                rl_completion_suppress_append = 0;
+            }
+        }
+    }
+    return matches;
 }
 
 // --- TOKENIZER & UTILS ---
@@ -122,12 +137,7 @@ std::string get_full_path(std::string cmd) {
 
 int main() {
     std::cout << std::unitbuf;
-    
-    // Initialize Readline hooks
     rl_attempted_completion_function = my_completion;
-    
-    // Ensure a space is appended after a successful, unique filename completion
-    rl_completion_append_character = ' ';
 
     while (true) {
         char* line = readline("$ ");
@@ -140,7 +150,7 @@ int main() {
         free(line);
         if (args.empty()) continue;
 
-        // --- REDIRECTION PARSING ---
+        // Redirection parsing
         std::string out_f = "", err_f = "";
         bool out_app = false, err_app = false;
         int redirect_idx = -1;
@@ -153,7 +163,7 @@ int main() {
         std::vector<std::string> cmd_args = args;
         if (redirect_idx != -1) cmd_args.erase(cmd_args.begin() + redirect_idx, cmd_args.end());
 
-        // Setup redirection files
+        // File prep
         if (!out_f.empty()) {
             fs::path p(out_f);
             if (p.has_parent_path()) fs::create_directories(p.parent_path());
