@@ -11,4 +11,4 @@ A functional Linux shell built from the ground up, designed to handle command ex
 ### 🛠 Tech Stack
 * **Language:** C++17
 * **Tools:** CMake, GNU Readline, Linux System Calls
-* **Environment:** Ubuntu 24.04 (via GitHub Codespaces)" >
+* **Environment:** Ubuntu 24.04 (via GitHub Codespaces)" 
