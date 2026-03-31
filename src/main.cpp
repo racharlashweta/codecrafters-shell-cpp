@@ -41,7 +41,7 @@ std::vector<std::string> tokenize(const std::string& s) {
     return tokens;
 }
 
-// --- BUILT-IN HANDLER (Critical for #NY9 compliance while solving #XK3) ---
+// --- BUILT-IN HANDLER ---
 bool handle_builtin(const std::vector<std::string>& args) {
     if (args.empty()) return false;
     std::string cmd = args[0];
@@ -108,23 +108,23 @@ void run_pipeline(const std::string& line) {
     while (std::getline(ss, seg, '|')) stages.push_back(seg);
 
     int n = stages.size();
-    int in_fd = 0; // Read from STDIN initially
+    int in_fd = 0; 
     std::vector<pid_t> pids;
 
     for (int i = 0; i < n; i++) {
         int fds[2];
-        if (i < n - 1) pipe(fds);
+        if (i < n - 1) {
+            if (pipe(fds) < 0) return;
+        }
 
         pid_t pid = fork();
         if (pid == 0) {
-            // Child: Handle Input Redirection
             if (i > 0) {
                 dup2(in_fd, STDIN_FILENO);
                 close(in_fd);
             }
-            // Child: Handle Output Redirection
             if (i < n - 1) {
-                close(fds[0]); // Don't need read-end
+                close(fds[0]);
                 dup2(fds[1], STDOUT_FILENO);
                 close(fds[1]);
             }
@@ -140,19 +140,17 @@ void run_pipeline(const std::string& line) {
             execvp(full.c_str(), ca.data());
             exit(1);
         } else {
-            // Parent: Cleanup descriptors
             pids.push_back(pid);
-            if (i > 0) close(in_fd); // Close the read-end from the previous stage
+            if (i > 0) close(in_fd); 
             if (i < n - 1) {
-                close(fds[1]); // CRITICAL: Parent MUST close write-end so next child gets EOF
-                in_fd = fds[0]; // Save read-end for next child
+                close(fds[1]); // <--- THIS IS THE FIX. Parent must close write-end.
+                in_fd = fds[0]; 
             }
         }
     }
 
-    // Wait for EVERY process in the chain to die
     for (pid_t p : pids) waitpid(p, nullptr, 0);
-    std::fflush(stdout); // Clear everything before readline prints the prompt
+    std::fflush(stdout); 
 }
 
 int main() {
