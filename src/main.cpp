@@ -12,25 +12,18 @@
 #include <algorithm>
 #include <cstring>
 
-// Readline headers
 #include <readline/readline.h>
 #include <readline/history.h>
 
 namespace fs = std::filesystem;
 
-// List of shell builtins
 std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd"};
 
-// --- DYNAMIC PATH SCANNER FOR AUTOCOMPLETION ---
 std::vector<std::string> get_all_matches(const std::string& prefix) {
     std::set<std::string> matches;
-    
-    // 1. Check builtins
     for (const auto& b : builtins_list) {
         if (b.compare(0, prefix.length(), prefix) == 0) matches.insert(b);
     }
-
-    // 2. Scan PATH for executables
     char* path_env = std::getenv("PATH");
     if (path_env) {
         std::stringstream ss(path_env);
@@ -53,22 +46,19 @@ std::vector<std::string> get_all_matches(const std::string& prefix) {
     return std::vector<std::string>(matches.begin(), matches.end());
 }
 
-// --- READLINE GENERATOR ---
 char* command_generator(const char* text, int state) {
     static std::vector<std::string> matches;
     static size_t match_index;
-
     if (!state) {
         matches = get_all_matches(text);
         match_index = 0;
     }
-
     if (match_index < matches.size()) {
         char* res = (char*)malloc(matches[match_index].length() + 1);
         std::strcpy(res, matches[match_index++].c_str());
         return res;
     }
-    return nullptr; // Triggers bell \x07 if no matches
+    return nullptr;
 }
 
 char** my_completion(const char* text, int start, int end) {
@@ -79,12 +69,10 @@ char** my_completion(const char* text, int start, int end) {
     return nullptr; 
 }
 
-// --- TOKENIZER ---
 std::vector<std::string> parse_arguments(const std::string& input) {
     std::vector<std::string> args;
     std::string current;
     bool in_s_quote = false, in_d_quote = false;
-
     for (size_t i = 0; i < input.length(); ++i) {
         char c = input[i];
         if (c == '\\' && !in_s_quote && !in_d_quote) {
@@ -140,7 +128,6 @@ int main() {
         free(line);
         if (args.empty()) continue;
 
-        // --- REDIRECTION PARSING ---
         std::string out_f = "", err_f = "";
         bool out_app = false, err_app = false;
         int redirect_idx = -1;
@@ -155,9 +142,20 @@ int main() {
         std::vector<std::string> cmd_args = args;
         if (redirect_idx != -1) cmd_args.erase(cmd_args.begin() + redirect_idx, cmd_args.end());
 
+        // CRITICAL FIX: Ensure files are created/truncated for EVERY command
+        if (!out_f.empty()) {
+            fs::path p(out_f);
+            if (p.has_parent_path()) fs::create_directories(p.parent_path());
+            std::ofstream(out_f, out_app ? std::ios::app : std::ios::out);
+        }
+        if (!err_f.empty()) {
+            fs::path p(err_f);
+            if (p.has_parent_path()) fs::create_directories(p.parent_path());
+            std::ofstream(err_f, err_app ? std::ios::app : std::ios::out);
+        }
+
         std::string command = cmd_args[0];
 
-        // --- EXECUTION ---
         if (command == "exit") return 0;
         else if (command == "echo") {
             std::ostream* out = &std::cout;
@@ -193,13 +191,11 @@ int main() {
                 pid_t pid = fork();
                 if (pid == 0) {
                     if (!out_f.empty()) {
-                        int flags = O_WRONLY | O_CREAT | (out_app ? O_APPEND : O_TRUNC);
-                        int fd = open(out_f.c_str(), flags, 0644);
+                        int fd = open(out_f.c_str(), O_WRONLY | O_CREAT | (out_app ? O_APPEND : O_TRUNC), 0644);
                         dup2(fd, STDOUT_FILENO); close(fd);
                     }
                     if (!err_f.empty()) {
-                        int flags = O_WRONLY | O_CREAT | (err_app ? O_APPEND : O_TRUNC);
-                        int fd = open(err_f.c_str(), flags, 0644);
+                        int fd = open(err_f.c_str(), O_WRONLY | O_CREAT | (err_app ? O_APPEND : O_TRUNC), 0644);
                         dup2(fd, STDERR_FILENO); close(fd);
                     }
                     std::vector<char*> c_args;
