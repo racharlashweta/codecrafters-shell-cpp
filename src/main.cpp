@@ -17,7 +17,8 @@
 
 namespace fs = std::filesystem;
 
-std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd"};
+// Add "jobs" to the recognized builtins
+std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
 // --- TOKENIZER ---
 std::vector<std::string> parse_arguments(const std::string& input) {
@@ -127,19 +128,16 @@ void custom_display_matches(char** matches, int num_matches, int max_length) {
     rl_redisplay();
 }
 
-// --- MASTER COMPLETION HOOK (Updated for #BF8) ---
+// --- MASTER COMPLETION HOOK ---
 char** my_completion(const char* text, int start, int end) {
     rl_completion_suppress_append = 0;
     rl_completion_append_character = ' ';
 
     char** matches = nullptr;
-    // start == 0 means we are at the very first word (the command)
     if (start == 0) {
         rl_attempted_completion_over = 1;
         matches = rl_completion_matches(text, command_generator);
-    } 
-    // start > 0 means we are at any argument position (2nd, 3rd, etc.)
-    else {
+    } else {
         rl_attempted_completion_over = 1; 
         matches = rl_completion_matches(text, rl_filename_completion_function);
     }
@@ -149,14 +147,12 @@ char** my_completion(const char* text, int start, int end) {
         return nullptr;
     }
 
-    // LCP and Multiple Match Logic
     if (matches[1] && matches[2]) {
         rl_completion_append_character = '\0'; 
         if (std::strcmp(matches[0], text) == 0) {
             rl_ding();
         }
     } else {
-        // Unique match logic
         if (fs::exists(matches[0]) && fs::is_directory(matches[0])) {
             rl_completion_append_character = '/';
             rl_completion_suppress_append = 1; 
@@ -168,7 +164,7 @@ char** my_completion(const char* text, int start, int end) {
     return matches;
 }
 
-// --- MAIN LOOP ---
+// --- MAIN SHELL ---
 int main() {
     std::cout << std::unitbuf;
     rl_attempted_completion_function = my_completion;
@@ -187,10 +183,11 @@ int main() {
         free(line);
         if (args.empty()) continue;
 
-        // Redirection
+        // Redirection Parsing
         std::string out_f = "", err_f = "";
         bool out_app = false, err_app = false;
         std::vector<std::string> cmd_args;
+
         for (int i = 0; i < (int)args.size(); ++i) {
             if (args[i] == ">" || args[i] == "1>") { out_f = args[++i]; out_app = false; }
             else if (args[i] == ">>" || args[i] == "1>>") { out_f = args[++i]; out_app = true; }
@@ -199,6 +196,7 @@ int main() {
             else { cmd_args.push_back(args[i]); }
         }
 
+        // Creation of redirection files
         if (!out_f.empty()) {
             fs::path p(out_f);
             if (p.has_parent_path()) fs::create_directories(p.parent_path());
@@ -255,6 +253,10 @@ int main() {
             if (path == "~") path = std::getenv("HOME");
             if (fs::exists(path)) fs::current_path(path);
             else std::cout << "cd: " << path << ": No such file or directory" << std::endl;
+        }
+        else if (command == "jobs") {
+            // Stage #AF3: Empty implementation
+            // Just return to prompt
         }
         else {
             std::string full_path = get_full_path(command);
