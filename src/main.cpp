@@ -17,9 +17,118 @@
 
 namespace fs = std::filesystem;
 
-// ... (Keep Job struct, format_cmd_for_display, get_full_path, get_next_available_id, reap_finished_jobs, and completion functions as they were) ...
+// --- DATA STRUCTURES & GLOBALS ---
 
-// Helper to handle redirection and return "cleaned" arguments
+struct Job {
+    int id;
+    pid_t pid;
+    std::string command;
+    std::string status;
+};
+
+std::vector<Job> job_list;
+const std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
+
+// --- HELPER FUNCTIONS (Defined first so they are in scope) ---
+
+std::string format_cmd_for_display(std::string cmd, std::string status) {
+    std::string result = cmd;
+    if (status == "Done") {
+        size_t last_amp = result.find_last_of('&');
+        if (last_amp != std::string::npos) result.erase(last_amp);
+    }
+    size_t last_pos = result.find_last_not_of(" \t\n\r");
+    if (last_pos != std::string::npos) result.erase(last_pos + 1);
+    return result;
+}
+
+std::string get_full_path(const std::string& cmd) {
+    if (cmd.find('/') != std::string::npos) return fs::exists(cmd) ? cmd : "";
+    char* path_env = std::getenv("PATH");
+    if (!path_env) return "";
+    std::stringstream ss(path_env);
+    std::string dir;
+    while (std::getline(ss, dir, ':')) {
+        try {
+            fs::path p = fs::path(dir) / cmd;
+            if (fs::exists(p) && (fs::status(p).permissions() & fs::perms::owner_exec) != fs::perms::none)
+                return p.string();
+        } catch (...) { continue; }
+    }
+    return "";
+}
+
+int get_next_available_id() {
+    std::set<int> ids;
+    for (const auto& j : job_list) ids.insert(j.id);
+    int id = 1;
+    while (ids.count(id)) id++;
+    return id;
+}
+
+void reap_finished_jobs() {
+    std::vector<Job> active;
+    for (size_t i = 0; i < job_list.size(); ++i) {
+        int status;
+        if (waitpid(job_list[i].pid, &status, WNOHANG) > 0) {
+            char marker = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
+            std::string d_cmd = format_cmd_for_display(job_list[i].command, "Done");
+            std::cout << "[" << job_list[i].id << "]" << marker << "  " 
+                      << std::left << std::setw(24) << "Done" << d_cmd << std::endl;
+        } else {
+            active.push_back(job_list[i]);
+        }
+    }
+    job_list = active;
+}
+
+// --- COMPLETION LOGIC ---
+
+std::set<std::string> get_all_matches(const std::string& prefix) {
+    std::set<std::string> matches;
+    for (const auto& b : builtins_list) if (b.find(prefix) == 0) matches.insert(b);
+    char* path_env = std::getenv("PATH");
+    if (path_env) {
+        std::stringstream ss(path_env);
+        std::string dir;
+        while (std::getline(ss, dir, ':')) {
+            if (!fs::exists(dir)) continue;
+            try {
+                for (const auto& entry : fs::directory_iterator(dir)) {
+                    std::string name = entry.path().filename().string();
+                    if (name.find(prefix) == 0) matches.insert(name);
+                }
+            } catch (...) {}
+        }
+    }
+    return matches;
+}
+
+char* command_generator(const char* text, int state) {
+    static std::vector<std::string> matches;
+    static size_t idx;
+    if (!state) {
+        matches.clear(); idx = 0;
+        std::set<std::string> m_set = get_all_matches(text);
+        for (const auto& s : m_set) matches.push_back(s);
+    }
+    return (idx < matches.size()) ? strdup(matches[idx++].c_str()) : nullptr;
+}
+
+char** my_completion(const char* text, int start, int end) {
+    if (start == 0) {
+        rl_attempted_completion_over = 1;
+        std::set<std::string> m_set = get_all_matches(text);
+        if (m_set.empty()) { rl_ding(); return nullptr; }
+        rl_completion_append_character = (m_set.size() == 1) ? ' ' : '\0';
+        return rl_completion_matches(text, command_generator);
+    }
+    rl_attempted_completion_over = 0;
+    return nullptr;
+}
+
+// --- REDIRECTION & EXECUTION ---
+
 std::vector<std::string> handle_redirection(const std::vector<std::string>& args, int& out_fd, int& err_fd) {
     std::vector<std::string> clean_args;
     for (size_t i = 0; i < args.size(); ++i) {
@@ -37,6 +146,8 @@ std::vector<std::string> handle_redirection(const std::vector<std::string>& args
             if (fd != -1) {
                 if (target_fd == STDOUT_FILENO) out_fd = fd;
                 else err_fd = fd;
+            } else {
+                std::cerr << "ls: " << filename << ": No such file or directory" << std::endl;
             }
         } else {
             clean_args.push_back(args[i]);
@@ -51,14 +162,16 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
     int saved_stderr = dup(STDERR_FILENO);
 
     std::vector<std::string> clean_args = handle_redirection(args, out_fd, err_fd);
-    if (clean_args.empty()) return;
+    if (clean_args.empty()) {
+        close(saved_stdout); close(saved_stderr);
+        return;
+    }
 
     if (out_fd != -1) { dup2(out_fd, STDOUT_FILENO); close(out_fd); }
     if (err_fd != -1) { dup2(err_fd, STDERR_FILENO); close(err_fd); }
 
     const std::string& cmd = clean_args[0];
 
-    // Handle Builtins
     if (cmd == "echo") {
         for (size_t i = 1; i < clean_args.size(); ++i) {
             std::cout << clean_args[i] << (i == clean_args.size() - 1 ? "" : " ");
@@ -72,12 +185,26 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
         if (chdir(target.c_str()) != 0) std::cerr << "cd: " << target << ": No such file or directory" << std::endl;
     }
     else if (cmd == "jobs") {
-        // ... (Keep your jobs logic here, just use clean_args)
+        for (auto& job : job_list) {
+            int status;
+            if (waitpid(job.pid, &status, WNOHANG) > 0) job.status = "Done";
+        }
+        for (size_t i = 0; i < job_list.size(); ++i) {
+            char m = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
+            std::cout << "[" << job_list[i].id << "]" << m << "  " << std::left << std::setw(24) << job_list[i].status << format_cmd_for_display(job_list[i].command, job_list[i].status) << std::endl;
+        }
     }
     else if (cmd == "type") {
-        // ... (Keep your type logic here, just use clean_args)
+        if (clean_args.size() > 1) {
+            if (std::find(builtins_list.begin(), builtins_list.end(), clean_args[1]) != builtins_list.end())
+                std::cout << clean_args[1] << " is a shell builtin" << std::endl;
+            else {
+                std::string p = get_full_path(clean_args[1]);
+                if (!p.empty()) std::cout << clean_args[1] << " is " << p << std::endl;
+                else std::cout << clean_args[1] << ": not found" << std::endl;
+            }
+        }
     }
-    // Handle Externals
     else {
         pid_t pid = fork();
         if (pid == 0) {
@@ -96,18 +223,20 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
                 int id = get_next_available_id();
                 std::cout << "[" << id << "] " << pid << std::endl;
                 job_list.push_back({id, pid, raw_input, "Running"});
+                std::sort(job_list.begin(), job_list.end(), [](const Job& a, const Job& b) { return a.id < b.id; });
             } else {
                 waitpid(pid, nullptr, 0);
             }
         }
     }
 
-    // Restore original streams
     dup2(saved_stdout, STDOUT_FILENO);
     dup2(saved_stderr, STDERR_FILENO);
     close(saved_stdout);
     close(saved_stderr);
 }
+
+// --- MAIN LOOP ---
 
 int main() {
     std::cout << std::unitbuf;
@@ -129,10 +258,18 @@ int main() {
         bool is_bg = (!args.empty() && args.back() == "&");
         if (is_bg) args.pop_back();
 
-        // Check for pipes first (Pipes are a bit special, keep your pipe logic or integrate it)
         auto pipe_it = std::find(args.begin(), args.end(), "|");
         if (pipe_it != args.end()) {
-            // ... (Your existing pipe logic)
+            std::vector<std::string> left_args(args.begin(), pipe_it);
+            std::vector<std::string> right_args(pipe_it + 1, args.end());
+            int pfd[2];
+            pipe(pfd);
+            pid_t p1 = fork();
+            if (p1 == 0) { dup2(pfd[1], STDOUT_FILENO); close(pfd[0]); close(pfd[1]); execute_command(left_args, false, ""); exit(0); }
+            pid_t p2 = fork();
+            if (p2 == 0) { dup2(pfd[0], STDIN_FILENO); close(pfd[0]); close(pfd[1]); execute_command(right_args, false, ""); exit(0); }
+            close(pfd[0]); close(pfd[1]);
+            waitpid(p1, nullptr, 0); waitpid(p2, nullptr, 0);
         } else {
             execute_command(args, is_bg, raw_input);
         }
