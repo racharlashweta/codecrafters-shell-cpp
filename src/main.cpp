@@ -29,7 +29,7 @@ struct Job {
 std::vector<Job> job_list;
 const std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
-// --- HELPER FUNCTIONS (Defined first so they are in scope) ---
+// --- HELPER FUNCTIONS ---
 
 std::string format_cmd_for_display(std::string cmd, std::string status) {
     std::string result = cmd;
@@ -73,8 +73,7 @@ void reap_finished_jobs() {
         if (waitpid(job_list[i].pid, &status, WNOHANG) > 0) {
             char marker = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
             std::string d_cmd = format_cmd_for_display(job_list[i].command, "Done");
-            std::cout << "[" << job_list[i].id << "]" << marker << "  " 
-                      << std::left << std::setw(24) << "Done" << d_cmd << std::endl;
+            std::cout << "[" << job_list[i].id << "]" << marker << "  Done                    " << d_cmd << std::endl;
         } else {
             active.push_back(job_list[i]);
         }
@@ -142,12 +141,11 @@ std::vector<std::string> handle_redirection(const std::vector<std::string>& args
 
         if (target_fd != -1 && i + 1 < args.size()) {
             std::string filename = args[++i];
-            int fd = open(filename.c_str(), O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC), 0644);
+            int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+            int fd = open(filename.c_str(), flags, 0644);
             if (fd != -1) {
                 if (target_fd == STDOUT_FILENO) out_fd = fd;
                 else err_fd = fd;
-            } else {
-                std::cerr << "ls: " << filename << ": No such file or directory" << std::endl;
             }
         } else {
             clean_args.push_back(args[i]);
@@ -193,6 +191,10 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
             char m = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
             std::cout << "[" << job_list[i].id << "]" << m << "  " << std::left << std::setw(24) << job_list[i].status << format_cmd_for_display(job_list[i].command, job_list[i].status) << std::endl;
         }
+        // Cleanup 'Done' jobs after showing them
+        std::vector<Job> active;
+        for (const auto& j : job_list) if (j.status == "Running") active.push_back(j);
+        job_list = active;
     }
     else if (cmd == "type") {
         if (clean_args.size() > 1) {
@@ -263,7 +265,7 @@ int main() {
             std::vector<std::string> left_args(args.begin(), pipe_it);
             std::vector<std::string> right_args(pipe_it + 1, args.end());
             int pfd[2];
-            pipe(pfd);
+            if (pipe(pfd) == -1) continue;
             pid_t p1 = fork();
             if (p1 == 0) { dup2(pfd[1], STDOUT_FILENO); close(pfd[0]); close(pfd[1]); execute_command(left_args, false, ""); exit(0); }
             pid_t p2 = fork();
