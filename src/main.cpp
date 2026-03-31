@@ -10,9 +10,49 @@
 #include <fcntl.h>
 #include <fstream>
 
+// Readline headers
+#include <readline/readline.h>
+#include <readline/history.h>
+
 namespace fs = std::filesystem;
 
-// Tokenizer (No changes needed)
+// Global set of builtins for the completion generator
+std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd"};
+
+// --- COMPLETION LOGIC ---
+
+// This function is called repeatedly by readline to find matches.
+// 'state' is 0 on the first call, and non-zero on subsequent calls for the same text.
+char* command_generator(const char* text, int state) {
+    static size_t list_index, len;
+    std::string name(text);
+
+    if (!state) {
+        list_index = 0;
+        len = name.length();
+    }
+
+    while (list_index < builtins_list.size()) {
+        std::string cur = builtins_list[list_index++];
+        if (cur.compare(0, len, name) == 0) {
+            // Readline expects a dynamically allocated C-string
+            char* res = (char*)malloc(cur.length() + 1);
+            strcpy(res, cur.c_str());
+            return res;
+        }
+    }
+    return nullptr;
+}
+
+// Hook that tells readline to use our generator
+char** my_completion(const char* text, int start, int end) {
+    // rl_attempted_completion_over = 1 prevents readline from 
+    // falling back to filename completion if no builtins match.
+    rl_attempted_completion_over = 1;
+    return rl_completion_matches(text, command_generator);
+}
+
+// --- TOKENIZER & PATH SEARCH (Same as previous stages) ---
 std::vector<std::string> parse_arguments(const std::string& input) {
     std::vector<std::string> args;
     std::string current_arg;
@@ -58,34 +98,47 @@ std::string get_path(std::string command) {
 }
 
 int main() {
-    std::cout << std::unitbuf;
-    std::cerr << std::unitbuf;
-    std::set<std::string> builtins = {"exit", "echo", "type", "pwd", "cd"};
+    // Setup Readline
+    rl_attempted_completion_function = my_completion;
 
     while (true) {
-        std::cout << "$ " << std::flush;
-        std::string input;
-        if (!std::getline(std::cin, input)) break;
+        // readline() prints the prompt and handles the input loop
+        char* line = readline("$ ");
+        
+        if (!line) break; // Handle Ctrl+D
+        
+        std::string input(line);
+        if (input.empty()) {
+            free(line);
+            continue;
+        }
+        
+        // Add to history (standard shell behavior)
+        add_history(line);
 
         std::vector<std::string> args = parse_arguments(input);
+        free(line); // Done with the raw C-string
+        
         if (args.empty()) continue;
 
+        // --- THE REST OF YOUR LOGIC (Redirection, Builtins, External Programs) ---
+        // (Include all the logic from the previous Append/Stderr stages here)
+        
         std::string stdout_file = "";
         std::string stderr_file = "";
         bool stdout_append = false;
         bool stderr_append = false;
         int redirect_idx = -1;
 
-        // --- NEW: REDIRECTION & APPEND PARSING ---
         for (int i = 0; i < (int)args.size(); ++i) {
             if (args[i] == ">" || args[i] == "1>") {
-                if (i + 1 < (int)args.size()) { stdout_file = args[i + 1]; stdout_append = false; redirect_idx = i; break; }
+                stdout_file = args[i + 1]; stdout_append = false; redirect_idx = i; break;
             } else if (args[i] == ">>" || args[i] == "1>>") {
-                if (i + 1 < (int)args.size()) { stdout_file = args[i + 1]; stdout_append = true; redirect_idx = i; break; }
+                stdout_file = args[i + 1]; stdout_append = true; redirect_idx = i; break;
             } else if (args[i] == "2>") {
-                if (i + 1 < (int)args.size()) { stderr_file = args[i + 1]; stderr_append = false; redirect_idx = i; break; }
+                stderr_file = args[i + 1]; stderr_append = false; redirect_idx = i; break;
             } else if (args[i] == "2>>") {
-                if (i + 1 < (int)args.size()) { stderr_file = args[i + 1]; stderr_append = true; redirect_idx = i; break; }
+                stderr_file = args[i + 1]; stderr_append = true; redirect_idx = i; break;
             }
         }
 
@@ -93,11 +146,9 @@ int main() {
         if (redirect_idx != -1) cmd_args.erase(cmd_args.begin() + redirect_idx, cmd_args.end());
         std::string command = cmd_args[0];
 
-        // Ensure files exist (even for builtins)
         if (!stdout_file.empty()) { std::ofstream(stdout_file, std::ios::app); }
         if (!stderr_file.empty()) { std::ofstream(stderr_file, std::ios::app); }
 
-        // --- BUILTINS ---
         if (command == "exit") return 0;
         else if (command == "echo") {
             std::ostream* out = &std::cout;
@@ -125,14 +176,14 @@ int main() {
         }
         else if (command == "type") {
             std::string target = cmd_args[1];
-            if (builtins.count(target)) std::cout << target << " is a shell builtin\n";
-            else {
+            if (std::find(builtins_list.begin(), builtins_list.end(), target) != builtins_list.end()) {
+                std::cout << target << " is a shell builtin\n";
+            } else {
                 std::string p = get_path(target);
                 if (!p.empty()) std::cout << target << " is " << p << "\n";
                 else std::cout << target << ": not found\n";
             }
         } 
-        // --- EXTERNAL PROGRAMS ---
         else {
             std::string full_path = get_path(command);
             if (!full_path.empty()) {
@@ -141,14 +192,12 @@ int main() {
                     if (!stdout_file.empty()) {
                         int flags = O_WRONLY | O_CREAT | (stdout_append ? O_APPEND : O_TRUNC);
                         int fd = open(stdout_file.c_str(), flags, 0644);
-                        dup2(fd, STDOUT_FILENO);
-                        close(fd);
+                        dup2(fd, STDOUT_FILENO); close(fd);
                     }
                     if (!stderr_file.empty()) {
                         int flags = O_WRONLY | O_CREAT | (stderr_append ? O_APPEND : O_TRUNC);
                         int fd = open(stderr_file.c_str(), flags, 0644);
-                        dup2(fd, STDERR_FILENO);
-                        close(fd);
+                        dup2(fd, STDERR_FILENO); close(fd);
                     }
                     std::vector<char*> c_args;
                     for (auto& arg : cmd_args) c_args.push_back(&arg[0]);
