@@ -26,7 +26,7 @@ struct Job {
 };
 
 std::vector<Job> job_list;
-std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
+const std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
 // --- REAPING LOGIC ---
 void reap_finished_jobs() {
@@ -73,15 +73,18 @@ std::vector<std::string> parse_arguments(const std::string& input) {
     return args;
 }
 
-std::string get_full_path(std::string cmd) {
+std::string get_full_path(const std::string& cmd) {
     char* path_env = std::getenv("PATH");
     if (!path_env) return "";
     std::stringstream ss(path_env);
     std::string dir;
     while (std::getline(ss, dir, ':')) {
-        fs::path p = fs::path(dir) / cmd;
-        if (fs::exists(p) && (fs::status(p).permissions() & fs::perms::owner_exec) != fs::perms::none)
-            return p.string();
+        if (dir.empty()) continue;
+        try {
+            fs::path p = fs::path(dir) / cmd;
+            if (fs::exists(p) && (fs::status(p).permissions() & fs::perms::owner_exec) != fs::perms::none)
+                return p.string();
+        } catch (...) { continue; }
     }
     return "";
 }
@@ -95,11 +98,13 @@ std::set<std::string> get_all_matches(const std::string& prefix) {
         std::stringstream ss(path_env);
         std::string dir;
         while (std::getline(ss, dir, ':')) {
-            if (!fs::exists(dir)) continue;
-            for (const auto& entry : fs::directory_iterator(dir)) {
-                std::string name = entry.path().filename().string();
-                if (name.find(prefix) == 0) matches.insert(name);
-            }
+            if (dir.empty() || !fs::exists(dir)) continue;
+            try {
+                for (const auto& entry : fs::directory_iterator(dir)) {
+                    std::string name = entry.path().filename().string();
+                    if (name.find(prefix) == 0) matches.insert(name);
+                }
+            } catch (...) { continue; }
         }
     }
     return matches;
@@ -122,11 +127,7 @@ char** my_completion(const char* text, int start, int end) {
     if (start == 0) {
         std::set<std::string> m_set = get_all_matches(text);
         if (m_set.empty()) { rl_ding(); return nullptr; }
-        
-        // If multiple matches exist, don't append space yet (allows for LCP completion)
-        if (m_set.size() > 1) rl_completion_append_character = '\0';
-        else rl_completion_append_character = ' ';
-        
+        rl_completion_append_character = (m_set.size() > 1) ? '\0' : ' ';
         return rl_completion_matches(text, command_generator);
     }
     return rl_completion_matches(text, rl_filename_completion_function);
@@ -165,7 +166,7 @@ int main() {
         }
 
         if (cmd_args.empty()) { free(line); continue; }
-        std::string command = cmd_args[0];
+        const std::string& command = cmd_args[0];
 
         if (command == "exit") { free(line); return 0; }
         else if (command == "jobs") {
@@ -186,6 +187,19 @@ int main() {
                 if (job_list[i].status == "Running") updated.push_back(job_list[i]);
             }
             job_list = updated;
+        }
+        else if (command == "type") {
+            if (cmd_args.size() < 2) { /* handle error */ }
+            else {
+                std::string target = cmd_args[1];
+                if (std::find(builtins_list.begin(), builtins_list.end(), target) != builtins_list.end())
+                    std::cout << target << " is a shell builtin" << std::endl;
+                else {
+                    std::string p = get_full_path(target);
+                    if (!p.empty()) std::cout << target << " is " << p << std::endl;
+                    else std::cout << target << ": not found" << std::endl;
+                }
+            }
         }
         else if (command == "echo") {
             for (size_t i = 1; i < cmd_args.size(); ++i) std::cout << cmd_args[i] << (i == cmd_args.size()-1 ? "" : " ");
@@ -212,7 +226,7 @@ int main() {
                         dup2(fd, STDERR_FILENO); close(fd);
                     }
                     std::vector<char*> c_args;
-                    for (auto& a : cmd_args) c_args.push_back(&a[0]);
+                    for (auto& a : cmd_args) c_args.push_back(const_cast<char*>(a.c_str()));
                     c_args.push_back(nullptr);
                     execvp(c_args[0], c_args.data());
                     exit(1);
