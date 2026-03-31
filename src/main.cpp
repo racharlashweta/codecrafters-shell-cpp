@@ -22,7 +22,7 @@ struct Job {
     int id;
     pid_t pid;
     std::string command;
-    std::string status;
+    std::string status; // "Running" or "Done"
 };
 
 std::vector<Job> job_list;
@@ -160,8 +160,7 @@ int main() {
         if (args.empty()) { free(line); continue; }
 
         bool is_background = (args.back() == "&");
-        // Store the original command string for the jobs list
-        std::string job_command = input;
+        std::string raw_cmd = input;
         
         if (is_background) args.pop_back();
 
@@ -190,16 +189,38 @@ int main() {
         if (command == "exit") return 0;
         else if (command == "jobs") {
             std::ofstream f; std::ostream* out = get_out(f);
+            
+            std::vector<Job> updated_job_list;
             for (size_t i = 0; i < job_list.size(); ++i) {
+                int status;
+                // WNOHANG: Check status without blocking
+                if (job_list[i].status == "Running" && waitpid(job_list[i].pid, &status, WNOHANG) > 0) {
+                    job_list[i].status = "Done";
+                    // Remove trailing '&' for Done jobs
+                    size_t amp = job_list[i].command.find_last_of('&');
+                    if (amp != std::string::npos) job_list[i].command.erase(amp);
+                    // Trim trailing space left by '&'
+                    while (!job_list[i].command.empty() && std::isspace(job_list[i].command.back())) 
+                        job_list[i].command.pop_back();
+                }
+
                 char marker = ' ';
                 if (i == job_list.size() - 1) marker = '+';
                 else if (i == job_list.size() - 2) marker = '-';
 
                 *out << "[" << job_list[i].id << "]" << marker << "  " 
-                     << std::left << std::setw(24) << "Running" 
+                     << std::left << std::setw(24) << job_list[i].status 
                      << job_list[i].command << std::endl;
+
+                // Keep only those that are still Running. 
+                // Done jobs are shown once and then discarded.
+                if (job_list[i].status == "Running") {
+                    updated_job_list.push_back(job_list[i]);
+                }
             }
+            job_list = updated_job_list;
         }
+        // ... (rest of the builtins: echo, type, pwd, cd) ...
         else if (command == "echo") {
             std::ofstream f; std::ostream* out = get_out(f);
             for (size_t i = 1; i < cmd_args.size(); ++i) *out << cmd_args[i] << (i == cmd_args.size()-1 ? "" : " ");
@@ -247,7 +268,7 @@ int main() {
                 } else {
                     if (is_background) {
                         std::cout << "[" << next_job_id << "] " << pid << std::endl;
-                        job_list.push_back({next_job_id++, pid, job_command, "Running"});
+                        job_list.push_back({next_job_id++, pid, raw_cmd, "Running"});
                     } else waitpid(pid, nullptr, 0);
                 }
             } else std::cout << command << ": command not found" << std::endl;
