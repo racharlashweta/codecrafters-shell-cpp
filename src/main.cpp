@@ -17,7 +17,7 @@
 
 namespace fs = std::filesystem;
 
-// --- DATA STRUCTURES ---
+// --- DATA STRUCTURES & GLOBALS ---
 struct Job {
     int id;
     pid_t pid;
@@ -75,40 +75,6 @@ void reap_finished_jobs() {
         } else { active.push_back(job_list[i]); }
     }
     job_list = active;
-}
-
-// --- COMPLETION ---
-char* command_generator(const char* text, int state) {
-    static std::vector<std::string> matches;
-    static size_t idx;
-    if (!state) {
-        matches.clear(); idx = 0;
-        std::string prefix(text);
-        for (const auto& b : builtins_list) if (b.find(prefix) == 0) matches.push_back(b);
-        char* path_env = std::getenv("PATH");
-        if (path_env) {
-            std::stringstream ss(path_env);
-            std::string dir;
-            while (std::getline(ss, dir, ':')) {
-                if (!fs::exists(dir)) continue;
-                try {
-                    for (const auto& entry : fs::directory_iterator(dir)) {
-                        std::string name = entry.path().filename().string();
-                        if (name.find(prefix) == 0) matches.push_back(name);
-                    }
-                } catch (...) {}
-            }
-        }
-    }
-    return (idx < matches.size()) ? strdup(matches[idx++].c_str()) : nullptr;
-}
-
-char** my_completion(const char* text, int start, int end) {
-    if (start == 0) {
-        rl_attempted_completion_over = 1;
-        return rl_completion_matches(text, command_generator);
-    }
-    return nullptr;
 }
 
 // --- PARSER ---
@@ -222,34 +188,76 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
     close(saved_stdout); close(saved_stderr);
 }
 
+// --- MAIN LOOP ---
 int main() {
     std::cout << std::unitbuf;
-    rl_attempted_completion_function = my_completion;
     while (true) {
         reap_finished_jobs();
         char* line = readline("$ ");
         if (!line) break;
         if (strlen(line) == 0) { free(line); continue; }
         add_history(line);
+        
         std::string input(line);
         std::vector<std::string> args = parse_args(input);
+        
+        // 1. Check for Background Jobs
         bool is_bg = (!args.empty() && args.back() == "&");
         if (is_bg) args.pop_back();
 
-        auto pipe_it = std::find(args.begin(), args.end(), "|");
-        if (pipe_it != args.end()) {
-            std::vector<std::string> left(args.begin(), pipe_it), right(pipe_it + 1, args.end());
-            int pfd[2]; pipe(pfd);
-            if (fork() == 0) { // Left side (can be builtin or external)
-                dup2(pfd[1], STDOUT_FILENO); close(pfd[0]); close(pfd[1]);
-                execute_command(left, false, ""); exit(0);
+        // 2. Handle Pipelines (Multi-stage)
+        std::vector<std::vector<std::string>> commands;
+        std::vector<std::string> current_cmd;
+        for (const auto& arg : args) {
+            if (arg == "|") {
+                commands.push_back(current_cmd);
+                current_cmd.clear();
+            } else {
+                current_cmd.push_back(arg);
             }
-            if (fork() == 0) { // Right side (can be builtin or external)
-                dup2(pfd[0], STDIN_FILENO); close(pfd[0]); close(pfd[1]);
-                execute_command(right, false, ""); exit(0);
+        }
+        commands.push_back(current_cmd);
+
+        if (commands.size() > 1) {
+            int num_cmds = commands.size();
+            int prev_pipe_read = -1;
+            std::vector<pid_t> pids;
+
+            for (int i = 0; i < num_cmds; ++i) {
+                int pfd[2];
+                if (i < num_cmds - 1) {
+                    if (pipe(pfd) == -1) { perror("pipe"); break; }
+                }
+
+                pid_t pid = fork();
+                if (pid == 0) {
+                    // If not the first command, take input from the previous pipe
+                    if (prev_pipe_read != -1) {
+                        dup2(prev_pipe_read, STDIN_FILENO);
+                        close(prev_pipe_read);
+                    }
+                    // If not the last command, send output to the current pipe
+                    if (i < num_cmds - 1) {
+                        dup2(pfd[1], STDOUT_FILENO);
+                        close(pfd[0]);
+                        close(pfd[1]);
+                    }
+                    execute_command(commands[i], false, "");
+                    exit(0);
+                }
+                
+                pids.push_back(pid);
+                // Parent cleanup
+                if (prev_pipe_read != -1) close(prev_pipe_read);
+                if (i < num_cmds - 1) {
+                    close(pfd[1]);
+                    prev_pipe_read = pfd[0];
+                }
             }
-            close(pfd[0]); close(pfd[1]); wait(nullptr); wait(nullptr);
-        } else { execute_command(args, is_bg, input); }
+            for (pid_t pid : pids) waitpid(pid, nullptr, 0);
+        } else {
+            execute_command(args, is_bg, input);
+        }
         free(line);
     }
     return 0;
