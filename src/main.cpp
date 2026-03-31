@@ -1,5 +1,4 @@
 #include <iostream>
-#include <iostream>
 #include <string>
 #include <vector>
 #include <set>
@@ -29,53 +28,43 @@ struct Job {
 std::vector<Job> job_list;
 std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
-// --- REAPING FUNCTION ---
-void reap_jobs(std::ostream& out) {
+// --- REAPING LOGIC ---
+// This function checks for finished processes, prints them as "Done", 
+// and removes them from the active job list.
+void reap_finished_jobs() {
     std::vector<Job> active_jobs;
     for (size_t i = 0; i < job_list.size(); ++i) {
         int status;
-        // Check if the process has exited without blocking
-        if (job_list[i].status == "Running" && waitpid(job_list[i].pid, &status, WNOHANG) > 0) {
-            job_list[i].status = "Done";
-            
-            // Format the command: remove trailing '&' for Done entries
-            size_t amp = job_list[i].command.find_last_of('&');
-            if (amp != std::string::npos) {
-                job_list[i].command.erase(amp);
-                while (!job_list[i].command.empty() && std::isspace(job_list[i].command.back())) 
-                    job_list[i].command.pop_back();
-            }
+        pid_t res = waitpid(job_list[i].pid, &status, WNOHANG);
 
-            // Determine marker for the Done line
+        if (res > 0) { // Process has exited
+            // Determine marker based on current position in the full list
             char marker = ' ';
             if (i == job_list.size() - 1) marker = '+';
             else if (i == job_list.size() - 2) marker = '-';
 
-            out << "[" << job_list[i].id << "]" << marker << "  " 
-                << std::left << std::setw(24) << "Done" 
-                << job_list[i].command << std::endl;
+            // Clean command string for "Done" output (remove trailing &)
+            std::string display_cmd = job_list[i].command;
+            size_t amp = display_cmd.find_last_of('&');
+            if (amp != std::string::npos) {
+                display_cmd.erase(amp);
+                display_cmd.erase(display_cmd.find_last_not_of(" \t\n\r\f\v") + 1);
+            }
+
+            std::cout << "[" << job_list[i].id << "]" << marker << "  " 
+                      << std::left << std::setw(24) << "Done" 
+                      << display_cmd << std::endl;
             
-            // Once printed as Done, we do NOT add it to active_jobs (it's reaped)
+            // Job is NOT added to active_jobs, so it is reaped/removed.
         } else {
+            // Process is still running or hasn't changed state
             active_jobs.push_back(job_list[i]);
         }
     }
     job_list = active_jobs;
 }
 
-// --- UTILS (Tokenizer, Path, LCP) ---
-std::string find_lcp(const std::set<std::string>& matches) {
-    if (matches.empty()) return "";
-    std::string prefix = *matches.begin();
-    for (const auto& s : matches) {
-        while (s.find(prefix) != 0) {
-            prefix = prefix.substr(0, prefix.length() - 1);
-            if (prefix.empty()) return "";
-        }
-    }
-    return prefix;
-}
-
+// --- TOKENIZER & UTILS ---
 std::vector<std::string> parse_arguments(const std::string& input) {
     std::vector<std::string> args;
     std::string current;
@@ -119,17 +108,14 @@ std::string get_full_path(std::string cmd) {
     return "";
 }
 
-// --- COMPLETION (Omitted for brevity, keep your existing logic) ---
-char** my_completion(const char* text, int start, int end);
-
-// --- MAIN ---
+// --- MAIN LOOP ---
 int main() {
     std::cout << std::unitbuf;
     int next_job_id = 1;
 
     while (true) {
-        // --- 1. Automatic Reaping before prompt ---
-        reap_jobs(std::cout);
+        // CRITICAL: Reap jobs BEFORE drawing the prompt
+        reap_finished_jobs();
 
         char* line = readline("$ ");
         if (!line) break;
@@ -141,10 +127,10 @@ int main() {
         if (args.empty()) { free(line); continue; }
 
         bool is_background = (args.back() == "&");
-        std::string raw_cmd = input;
+        std::string raw_input = input;
         if (is_background) args.pop_back();
 
-        // Handle Redirection logic (omitted here, keep your existing implementation)
+        // Redirection Parsing
         std::string out_f = "", err_f = "";
         bool out_app = false, err_app = false;
         std::vector<std::string> cmd_args;
@@ -157,13 +143,14 @@ int main() {
         }
 
         std::string command = cmd_args[0];
-        if (command == "exit") return 0;
-        
-        // --- 2. Jobs Builtin Reaping ---
+
+        if (command == "exit") {
+            free(line);
+            return 0;
+        }
         else if (command == "jobs") {
-            // First reap to find any newly finished jobs
-            reap_jobs(std::cout); 
-            // Then list what is currently Running
+            // Builtin 'jobs' also reaps first to show updated status
+            reap_finished_jobs();
             for (size_t i = 0; i < job_list.size(); ++i) {
                 char marker = ' ';
                 if (i == job_list.size() - 1) marker = '+';
@@ -175,7 +162,8 @@ int main() {
             }
         }
         else if (command == "echo") {
-            for (size_t i = 1; i < cmd_args.size(); ++i) std::cout << cmd_args[i] << (i == cmd_args.size()-1 ? "" : " ");
+            for (size_t i = 1; i < cmd_args.size(); ++i) 
+                std::cout << cmd_args[i] << (i == cmd_args.size()-1 ? "" : " ");
             std::cout << std::endl;
         }
         else if (command == "type") {
@@ -192,7 +180,7 @@ int main() {
             std::cout << fs::current_path().string() << std::endl;
         }
         else if (command == "cd") {
-            std::string path = cmd_args.size() > 1 ? cmd_args[1] : "";
+            std::string path = (cmd_args.size() > 1) ? cmd_args[1] : "";
             if (path == "~") path = std::getenv("HOME");
             if (fs::exists(path)) fs::current_path(path);
             else std::cout << "cd: " << path << ": No such file or directory" << std::endl;
@@ -202,7 +190,15 @@ int main() {
             if (!full_path.empty()) {
                 pid_t pid = fork();
                 if (pid == 0) {
-                    // Exec logic with redirection (omitted here, keep your existing)
+                    // Child Redirection
+                    if (!out_f.empty()) {
+                        int fd = open(out_f.c_str(), O_WRONLY | O_CREAT | (out_app ? O_APPEND : O_TRUNC), 0644);
+                        dup2(fd, STDOUT_FILENO); close(fd);
+                    }
+                    if (!err_f.empty()) {
+                        int fd = open(err_f.c_str(), O_WRONLY | O_CREAT | (err_app ? O_APPEND : O_TRUNC), 0644);
+                        dup2(fd, STDERR_FILENO); close(fd);
+                    }
                     std::vector<char*> c_args;
                     for (auto& a : cmd_args) c_args.push_back(&a[0]);
                     c_args.push_back(nullptr);
@@ -211,10 +207,14 @@ int main() {
                 } else {
                     if (is_background) {
                         std::cout << "[" << next_job_id << "] " << pid << std::endl;
-                        job_list.push_back({next_job_id++, pid, raw_cmd, "Running"});
-                    } else waitpid(pid, nullptr, 0);
+                        job_list.push_back({next_job_id++, pid, raw_input, "Running"});
+                    } else {
+                        waitpid(pid, nullptr, 0);
+                    }
                 }
-            } else std::cout << command << ": command not found" << std::endl;
+            } else {
+                std::cout << command << ": command not found" << std::endl;
+            }
         }
         free(line);
     }
