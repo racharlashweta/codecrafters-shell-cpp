@@ -157,11 +157,12 @@ int main() {
         add_history(line);
 
         std::vector<std::string> args = parse_arguments(input);
-        free(line);
-        if (args.empty()) continue;
+        if (args.empty()) { free(line); continue; }
 
         bool is_background = (args.back() == "&");
-        std::string original_input = input;
+        // Store the original command string for the jobs list
+        std::string job_command = input;
+        
         if (is_background) args.pop_back();
 
         std::string out_f = "", err_f = "";
@@ -175,9 +176,8 @@ int main() {
             else { cmd_args.push_back(args[i]); }
         }
 
-        if (cmd_args.empty()) continue;
+        if (cmd_args.empty()) { free(line); continue; }
 
-        // Ensure files exist for all commands
         if (!out_f.empty()) std::ofstream(out_f, out_app ? std::ios::app : std::ios::out).close();
         if (!err_f.empty()) std::ofstream(err_f, err_app ? std::ios::app : std::ios::out).close();
 
@@ -190,8 +190,14 @@ int main() {
         if (command == "exit") return 0;
         else if (command == "jobs") {
             std::ofstream f; std::ostream* out = get_out(f);
-            for (const auto& job : job_list) {
-                *out << "[" << job.id << "]+  " << std::left << std::setw(24) << "Running" << job.command << std::endl;
+            for (size_t i = 0; i < job_list.size(); ++i) {
+                char marker = ' ';
+                if (i == job_list.size() - 1) marker = '+';
+                else if (i == job_list.size() - 2) marker = '-';
+
+                *out << "[" << job_list[i].id << "]" << marker << "  " 
+                     << std::left << std::setw(24) << "Running" 
+                     << job_list[i].command << std::endl;
             }
         }
         else if (command == "echo") {
@@ -241,11 +247,12 @@ int main() {
                 } else {
                     if (is_background) {
                         std::cout << "[" << next_job_id << "] " << pid << std::endl;
-                        job_list.push_back({next_job_id++, pid, original_input, "Running"});
+                        job_list.push_back({next_job_id++, pid, job_command, "Running"});
                     } else waitpid(pid, nullptr, 0);
                 }
             } else std::cout << command << ": command not found" << std::endl;
         }
+        free(line);
     }
     return 0;
 }
