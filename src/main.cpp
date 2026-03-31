@@ -29,15 +29,16 @@ const std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "
 
 // --- UTILS & FORMATTING ---
 
-// Strips trailing '&' and whitespace for cleaner output
+// Strips trailing '&' and whitespace to match tester expectations
 std::string format_cmd_for_display(std::string cmd, std::string status) {
+    std::string result = cmd;
     if (status == "Done") {
-        size_t last_amp = cmd.find_last_of('&');
-        if (last_amp != std::string::npos) cmd.erase(last_amp);
+        size_t last_amp = result.find_last_of('&');
+        if (last_amp != std::string::npos) result.erase(last_amp);
     }
-    size_t last_pos = cmd.find_last_not_of(" \t\n\r");
-    if (last_pos != std::string::npos) cmd.erase(last_pos + 1);
-    return cmd;
+    size_t last_pos = result.find_last_not_of(" \t\n\r");
+    if (last_pos != std::string::npos) result.erase(last_pos + 1);
+    return result;
 }
 
 std::string get_full_path(const std::string& cmd) {
@@ -137,7 +138,7 @@ void run_external(std::vector<std::string> args) {
     std::vector<char*> c_args;
     for (auto& a : args) c_args.push_back(const_cast<char*>(a.c_str()));
     c_args.push_back(nullptr);
-    execv(path.c_str(), c_args.data());
+    execvp(path.c_str(), c_args.data());
     exit(1);
 }
 
@@ -153,11 +154,13 @@ int main() {
         add_history(line);
         std::string raw_input(line);
 
-        // Parsing logic
+        // Simple argument parsing
         std::vector<std::string> args;
         std::stringstream ss(raw_input);
         std::string tmp;
         while (ss >> tmp) args.push_back(tmp);
+
+        if (args.empty()) { free(line); continue; }
 
         bool is_bg = (args.back() == "&");
         if (is_bg) args.pop_back();
@@ -199,24 +202,43 @@ int main() {
                 std::cout << std::endl;
             }
             else if (cmd == "jobs") {
-                // Sync status with OS before printing
+                // FORCE status update for all jobs before printing
                 for (auto& job : job_list) {
                     int status;
-                    if (job.status == "Running" && waitpid(job.pid, &status, WNOHANG) > 0) {
+                    if (waitpid(job.pid, &status, WNOHANG) > 0) {
                         job.status = "Done";
                     }
                 }
                 
-                std::vector<Job> still_running;
+                std::vector<Job> active_after_print;
                 for (size_t i = 0; i < job_list.size(); ++i) {
                     char m = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
                     std::string d_cmd = format_cmd_for_display(job_list[i].command, job_list[i].status);
+                    
                     std::cout << "[" << job_list[i].id << "]" << m << "  " 
                               << std::left << std::setw(24) << job_list[i].status << d_cmd << std::endl;
                     
-                    if (job_list[i].status == "Running") still_running.push_back(job_list[i]);
+                    // If it was Done, we don't keep it in the list anymore
+                    if (job_list[i].status == "Running") {
+                        active_after_print.push_back(job_list[i]);
+                    }
                 }
-                job_list = still_running;
+                job_list = active_after_print;
+            }
+            else if (cmd == "type") {
+                if (args.size() > 1) {
+                    if (std::find(builtins_list.begin(), builtins_list.end(), args[1]) != builtins_list.end())
+                        std::cout << args[1] << " is a shell builtin" << std::endl;
+                    else {
+                        std::string p = get_full_path(args[1]);
+                        if (!p.empty()) std::cout << args[1] << " is " << p << std::endl;
+                        else std::cout << args[1] << ": not found" << std::endl;
+                    }
+                }
+            }
+            else if (cmd == "cd") {
+                std::string target = (args.size() > 1) ? args[1] : std::getenv("HOME");
+                if (chdir(target.c_str()) != 0) std::cerr << "cd: " << target << ": No such file or directory" << std::endl;
             }
             else {
                 pid_t pid = fork();
@@ -226,8 +248,11 @@ int main() {
                         int id = get_next_available_id();
                         std::cout << "[" << id << "] " << pid << std::endl;
                         job_list.push_back({id, pid, raw_input, "Running"});
+                        // Ensure stable order by job ID
                         std::sort(job_list.begin(), job_list.end(), [](const Job& a, const Job& b) { return a.id < b.id; });
-                    } else waitpid(pid, nullptr, 0);
+                    } else {
+                        waitpid(pid, nullptr, 0);
+                    }
                 }
             }
         }
