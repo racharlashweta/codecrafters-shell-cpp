@@ -172,7 +172,12 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
 
     if (cmd == "echo") {
         for (size_t i = 1; i < clean_args.size(); ++i) {
-            std::cout << clean_args[i] << (i == clean_args.size() - 1 ? "" : " ");
+            std::string word = clean_args[i];
+            // Strip surrounding quotes so we don't print ""Maria says Error""
+            if (word.size() >= 2 && ((word.front() == '"' && word.back() == '"') || (word.front() == '\'' && word.back() == '\''))) {
+                word = word.substr(1, word.size() - 2);
+            }
+            std::cout << word << (i == clean_args.size() - 1 ? "" : " ");
         }
         std::cout << std::endl;
     } 
@@ -191,7 +196,6 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
             char m = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
             std::cout << "[" << job_list[i].id << "]" << m << "  " << std::left << std::setw(24) << job_list[i].status << format_cmd_for_display(job_list[i].command, job_list[i].status) << std::endl;
         }
-        // Cleanup 'Done' jobs after showing them
         std::vector<Job> active;
         for (const auto& j : job_list) if (j.status == "Running") active.push_back(j);
         job_list = active;
