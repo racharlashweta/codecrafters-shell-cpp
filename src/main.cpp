@@ -19,7 +19,7 @@ namespace fs = std::filesystem;
 
 std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd"};
 
-// --- COMMAND MATCHING (For the first word) ---
+// --- COMMAND GENERATOR (For the first word) ---
 std::vector<std::string> get_command_matches(const std::string& prefix) {
     std::set<std::string> matches;
     for (const auto& b : builtins_list) {
@@ -62,17 +62,17 @@ char* command_generator(const char* text, int state) {
     return nullptr;
 }
 
-// --- UPDATED COMPLETION HOOK ---
+// --- UPDATED COMPLETION HOOK FOR NESTED PATHS ---
 char** my_completion(const char* text, int start, int end) {
-    // If it's the first word, complete commands
+    // start == 0 means we are completing the first word (the command)
     if (start == 0) {
         rl_attempted_completion_over = 1;
         return rl_completion_matches(text, command_generator);
     } 
     
-    // Otherwise, complete filenames in the current directory
-    // rl_filename_completion_function is a built-in Readline utility
-    rl_attempted_completion_over = 0; // Let Readline handle filename logic
+    // For any subsequent words, use the built-in filename completion.
+    // This natively handles nested paths (e.g., path/to/f -> path/to/file.txt)
+    rl_attempted_completion_over = 0; 
     return rl_completion_matches(text, rl_filename_completion_function);
 }
 
@@ -122,9 +122,11 @@ std::string get_full_path(std::string cmd) {
 
 int main() {
     std::cout << std::unitbuf;
+    
+    // Initialize Readline hooks
     rl_attempted_completion_function = my_completion;
     
-    // Standard shell behavior: append space after a successful completion
+    // Ensure a space is appended after a successful, unique filename completion
     rl_completion_append_character = ' ';
 
     while (true) {
@@ -138,7 +140,7 @@ int main() {
         free(line);
         if (args.empty()) continue;
 
-        // --- REDIRECTION & EXECUTION (Keep your existing logic) ---
+        // --- REDIRECTION PARSING ---
         std::string out_f = "", err_f = "";
         bool out_app = false, err_app = false;
         int redirect_idx = -1;
@@ -151,6 +153,7 @@ int main() {
         std::vector<std::string> cmd_args = args;
         if (redirect_idx != -1) cmd_args.erase(cmd_args.begin() + redirect_idx, cmd_args.end());
 
+        // Setup redirection files
         if (!out_f.empty()) {
             fs::path p(out_f);
             if (p.has_parent_path()) fs::create_directories(p.parent_path());
