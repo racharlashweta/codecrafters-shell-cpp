@@ -12,13 +12,12 @@
 
 namespace fs = std::filesystem;
 
-// Tokenizer handles ', ", and \ (Same as before)
+// Tokenizer (No changes here)
 std::vector<std::string> parse_arguments(const std::string& input) {
     std::vector<std::string> args;
     std::string current_arg;
     bool in_single_quotes = false;
     bool in_double_quotes = false;
-
     for (size_t i = 0; i < input.length(); ++i) {
         char c = input[i];
         if (c == '\\' && !in_single_quotes && !in_double_quotes) {
@@ -28,9 +27,8 @@ std::vector<std::string> parse_arguments(const std::string& input) {
         if (c == '\\' && in_double_quotes) {
             if (i + 1 < input.length()) {
                 char next = input[i + 1];
-                if (next == '\"' || next == '\\' || next == '$') {
-                    current_arg += next; i++;
-                } else current_arg += c;
+                if (next == '\"' || next == '\\' || next == '$') { current_arg += next; i++; }
+                else current_arg += c;
             } else current_arg += c;
             continue;
         }
@@ -69,37 +67,28 @@ int main() {
         std::vector<std::string> args = parse_arguments(input);
         if (args.empty()) continue;
 
-        // --- NEW: REDIRECTION PARSING ---
         std::string stdout_file = "";
         std::string stderr_file = "";
         int redirect_idx = -1;
 
         for (int i = 0; i < (int)args.size(); ++i) {
             if (args[i] == ">" || args[i] == "1>") {
-                if (i + 1 < (int)args.size()) {
-                    stdout_file = args[i + 1];
-                    redirect_idx = i;
-                    break;
-                }
+                if (i + 1 < (int)args.size()) { stdout_file = args[i + 1]; redirect_idx = i; break; }
             } else if (args[i] == "2>") {
-                if (i + 1 < (int)args.size()) {
-                    stderr_file = args[i + 1];
-                    redirect_idx = i;
-                    break;
-                }
+                if (i + 1 < (int)args.size()) { stderr_file = args[i + 1]; redirect_idx = i; break; }
             }
         }
 
         std::vector<std::string> cmd_args = args;
-        if (redirect_idx != -1) {
-            cmd_args.erase(cmd_args.begin() + redirect_idx, cmd_args.end());
-        }
-
+        if (redirect_idx != -1) cmd_args.erase(cmd_args.begin() + redirect_idx, cmd_args.end());
         std::string command = cmd_args[0];
 
-        // Builtins (Simple check for redirection)
+        // --- BUILTINS ---
         if (command == "exit") return 0;
         else if (command == "echo") {
+            // ALWAYS create the stderr file if requested, even if we don't use it
+            if (!stderr_file.empty()) std::ofstream(stderr_file); 
+            
             std::ostream* out = &std::cout;
             std::ofstream file_out;
             if (!stdout_file.empty()) {
@@ -112,6 +101,7 @@ int main() {
             *out << "\n";
         }
         else if (command == "pwd") {
+            if (!stderr_file.empty()) std::ofstream(stderr_file);
             if (!stdout_file.empty()) {
                 std::ofstream out(stdout_file);
                 out << fs::current_path().string() << "\n";
@@ -137,7 +127,7 @@ int main() {
             std::string full_path = get_path(command);
             if (!full_path.empty()) {
                 pid_t pid = fork();
-                if (pid == 0) { // Child
+                if (pid == 0) {
                     if (!stdout_file.empty()) {
                         int fd = open(stdout_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
                         dup2(fd, STDOUT_FILENO);
@@ -145,7 +135,7 @@ int main() {
                     }
                     if (!stderr_file.empty()) {
                         int fd = open(stderr_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                        dup2(fd, STDERR_FILENO); // Point Stderr (2) to file
+                        dup2(fd, STDERR_FILENO);
                         close(fd);
                     }
                     std::vector<char*> c_args;
