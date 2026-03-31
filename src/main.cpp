@@ -12,7 +12,7 @@
 
 namespace fs = std::filesystem;
 
-// Tokenizer (No changes here)
+// Tokenizer (Same as before)
 std::vector<std::string> parse_arguments(const std::string& input) {
     std::vector<std::string> args;
     std::string current_arg;
@@ -71,6 +71,7 @@ int main() {
         std::string stderr_file = "";
         int redirect_idx = -1;
 
+        // Parse redirection tags
         for (int i = 0; i < (int)args.size(); ++i) {
             if (args[i] == ">" || args[i] == "1>") {
                 if (i + 1 < (int)args.size()) { stdout_file = args[i + 1]; redirect_idx = i; break; }
@@ -79,16 +80,18 @@ int main() {
             }
         }
 
+        // Prepare command arguments (remove redirection tokens)
         std::vector<std::string> cmd_args = args;
         if (redirect_idx != -1) cmd_args.erase(cmd_args.begin() + redirect_idx, cmd_args.end());
+        
         std::string command = cmd_args[0];
 
-        // --- BUILTINS ---
+        // Ensure files are created even for builtins
+        if (!stdout_file.empty()) { std::ofstream out(stdout_file); }
+        if (!stderr_file.empty()) { std::ofstream err(stderr_file); }
+
         if (command == "exit") return 0;
         else if (command == "echo") {
-            // ALWAYS create the stderr file if requested, even if we don't use it
-            if (!stderr_file.empty()) std::ofstream(stderr_file); 
-            
             std::ostream* out = &std::cout;
             std::ofstream file_out;
             if (!stdout_file.empty()) {
@@ -101,7 +104,6 @@ int main() {
             *out << "\n";
         }
         else if (command == "pwd") {
-            if (!stderr_file.empty()) std::ofstream(stderr_file);
             if (!stdout_file.empty()) {
                 std::ofstream out(stdout_file);
                 out << fs::current_path().string() << "\n";
@@ -122,7 +124,6 @@ int main() {
                 else std::cout << target << ": not found\n";
             }
         } 
-        // --- EXTERNAL PROGRAMS ---
         else {
             std::string full_path = get_path(command);
             if (!full_path.empty()) {
