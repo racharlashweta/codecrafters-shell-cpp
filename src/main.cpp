@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <cstring>
 
-// Readline headers
 #include <readline/readline.h>
 #include <readline/history.h>
 
@@ -64,25 +63,16 @@ char* command_generator(const char* text, int state) {
     return nullptr;
 }
 
-// --- CUSTOM DISPLAY HOOK (Required for #WH6) ---
+// --- DISPLAY HOOK (From Stage #WH6) ---
 void display_matches(char** matches, int num_matches, int max_length) {
-    // 1. Move to a new line
     std::cout << "\n";
-    
-    // 2. Gather and sort matches (matches[0] is the prefix, actual matches start at [1])
     std::vector<std::string> sorted_matches;
-    for (int i = 1; i <= num_matches; ++i) {
-        sorted_matches.push_back(matches[i]);
-    }
+    for (int i = 1; i <= num_matches; ++i) sorted_matches.push_back(matches[i]);
     std::sort(sorted_matches.begin(), sorted_matches.end());
-
-    // 3. Print matches separated by two spaces
     for (size_t i = 0; i < sorted_matches.size(); ++i) {
         std::cout << sorted_matches[i] << (i == sorted_matches.size() - 1 ? "" : "  ");
     }
     std::cout << "\n";
-    
-    // 4. Redisplay the prompt and current input
     rl_on_new_line();
     rl_redisplay();
 }
@@ -90,7 +80,15 @@ void display_matches(char** matches, int num_matches, int max_length) {
 char** my_completion(const char* text, int start, int end) {
     if (start == 0) {
         rl_attempted_completion_over = 1;
-        return rl_completion_matches(text, command_generator);
+        char** matches = rl_completion_matches(text, command_generator);
+        
+        // If we have more than one match, don't append a space yet
+        if (matches && matches[1] && matches[2]) {
+            rl_completion_append_character = '\0'; 
+        } else {
+            rl_completion_append_character = ' ';
+        }
+        return matches;
     }
     return nullptr; 
 }
@@ -141,12 +139,8 @@ std::string get_full_path(std::string cmd) {
 
 int main() {
     std::cout << std::unitbuf;
-    
-    // Readline Setup
     rl_attempted_completion_function = my_completion;
     rl_completion_display_matches_hook = display_matches;
-    
-    // Bell on first failed unique completion, list on second
     rl_variable_bind("show-all-if-ambiguous", "off"); 
     rl_variable_bind("bell-style", "audible");
 
@@ -165,18 +159,16 @@ int main() {
         std::string out_f = "", err_f = "";
         bool out_app = false, err_app = false;
         int redirect_idx = -1;
-
         for (int i = 0; i < (int)args.size(); ++i) {
             if (args[i] == ">" || args[i] == "1>") { out_f = args[i+1]; out_app = false; redirect_idx = i; break; }
             else if (args[i] == ">>" || args[i] == "1>>") { out_f = args[i+1]; out_app = true; redirect_idx = i; break; }
             else if (args[i] == "2>") { err_f = args[i+1]; err_app = false; redirect_idx = i; break; }
             else if (args[i] == "2>>") { err_f = args[i+1]; err_app = true; redirect_idx = i; break; }
         }
-
         std::vector<std::string> cmd_args = args;
         if (redirect_idx != -1) cmd_args.erase(cmd_args.begin() + redirect_idx, cmd_args.end());
 
-        // Create files for ALL commands (Builtins + Externals)
+        // File setup
         if (!out_f.empty()) {
             fs::path p(out_f);
             if (p.has_parent_path()) fs::create_directories(p.parent_path());
@@ -189,7 +181,6 @@ int main() {
         }
 
         std::string command = cmd_args[0];
-
         if (command == "exit") return 0;
         else if (command == "echo") {
             std::ostream* out = &std::cout;
