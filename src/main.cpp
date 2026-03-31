@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <algorithm>
 #include <cstring>
+#include <signal.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 
@@ -17,6 +18,14 @@ namespace fs = std::filesystem;
 const std::vector<std::string> builtins = {"echo", "exit", "type", "pwd", "cd"};
 
 // --- UTILS ---
+
+std::string trim(const std::string& s) {
+    size_t start = s.find_first_not_of(" \t");
+    size_t end = s.find_last_not_of(" \t");
+    if (start == std::string::npos) return "";
+    return s.substr(start, end - start + 1);
+}
+
 std::string get_path(const std::string& cmd) {
     if (cmd.find('/') != std::string::npos) return fs::exists(cmd) ? cmd : "";
     char* env = std::getenv("PATH");
@@ -32,15 +41,7 @@ std::string get_path(const std::string& cmd) {
     return "";
 }
 
-// Trim helper
-std::string trim(const std::string& s) {
-    size_t start = s.find_first_not_of(" \t");
-    size_t end = s.find_last_not_of(" \t");
-    if (start == std::string::npos) return "";
-    return s.substr(start, end - start + 1);
-}
-
-// Tokenizer with simple quote handling
+// Tokenizer with quote support
 std::vector<std::string> tokenize(const std::string& s) {
     std::vector<std::string> tokens;
     std::string current;
@@ -58,14 +59,16 @@ std::vector<std::string> tokenize(const std::string& s) {
             current += c;
         }
     }
-    if (!current.empty()) tokens.push_back(current);
 
+    if (!current.empty()) tokens.push_back(current);
     return tokens;
 }
 
-// Built-in handler
+// --- BUILTINS ---
+
 bool handle_builtin(const std::vector<std::string>& args) {
     if (args.empty()) return false;
+
     std::string cmd = args[0];
 
     if (cmd == "echo") {
@@ -75,9 +78,12 @@ bool handle_builtin(const std::vector<std::string>& args) {
         }
         std::cout << std::endl;
         return true;
-    } else if (cmd == "type") {
+    }
+
+    if (cmd == "type") {
         if (args.size() < 2) return true;
         std::string target = args[1];
+
         if (std::find(builtins.begin(), builtins.end(), target) != builtins.end()) {
             std::cout << target << " is a shell builtin" << std::endl;
         } else {
@@ -86,15 +92,19 @@ bool handle_builtin(const std::vector<std::string>& args) {
             else std::cout << target << ": not found" << std::endl;
         }
         return true;
-    } else if (cmd == "pwd") {
+    }
+
+    if (cmd == "pwd") {
         std::cout << fs::current_path().string() << std::endl;
         return true;
     }
+
     return false;
 }
 
 // --- PIPELINE ENGINE ---
-void run_pipeline(const std::string& line) {
+
+void run_pipeline(const std::string& line, bool is_background, int& job_id) {
     std::vector<std::string> stages;
     std::stringstream ss(line);
     std::string seg;
@@ -127,7 +137,6 @@ void run_pipeline(const std::string& line) {
                 dup2(fds[1], STDOUT_FILENO);
             }
 
-            // Close unused fds
             if (prev_read_fd != -1) close(prev_read_fd);
             if (i < n - 1) {
                 close(fds[0]);
@@ -150,6 +159,7 @@ void run_pipeline(const std::string& line) {
             exit(1);
         } else {
             // PARENT
+
             pids.push_back(pid);
 
             if (prev_read_fd != -1) close(prev_read_fd);
@@ -161,16 +171,26 @@ void run_pipeline(const std::string& line) {
         }
     }
 
-    for (pid_t p : pids) {
-        waitpid(p, nullptr, 0);
+    if (is_background) {
+        std::cout << "[" << job_id++ << "] " << pids.back() << std::endl;
+    } else {
+        for (pid_t p : pids) {
+            waitpid(p, nullptr, 0);
+        }
     }
 
     std::cout << std::flush;
 }
 
 // --- MAIN ---
+
 int main() {
     std::cout << std::unitbuf;
+
+    // Prevent zombie processes
+    signal(SIGCHLD, SIG_IGN);
+
+    int job_id = 1;
 
     while (true) {
         char* line = readline("$ ");
@@ -184,8 +204,16 @@ int main() {
         add_history(line);
         std::string input(line);
 
+        // Detect background job
+        bool is_background = false;
+        if (!input.empty() && input.back() == '&') {
+            is_background = true;
+            input.pop_back();
+            input = trim(input);
+        }
+
         if (input.find('|') != std::string::npos) {
-            run_pipeline(input);
+            run_pipeline(input, is_background, job_id);
         } else {
             std::vector<std::string> args = tokenize(input);
             if (args.empty()) {
@@ -213,7 +241,11 @@ int main() {
                     }
                     exit(1);
                 } else {
-                    waitpid(pid, nullptr, 0);
+                    if (is_background) {
+                        std::cout << "[" << job_id++ << "] " << pid << std::endl;
+                    } else {
+                        waitpid(pid, nullptr, 0);
+                    }
                     std::cout << std::flush;
                 }
             }
