@@ -28,44 +28,38 @@ struct Job {
 std::vector<Job> job_list;
 const std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
-// --- ID RECYCLING LOGIC ---
+std::string format_cmd_for_display(std::string cmd, std::string status) {
+    if (status == "Done") {
+        size_t last_amp = cmd.find_last_of('&');
+        if (last_amp != std::string::npos) {
+            cmd.erase(last_amp);
+        }
+    }
+    size_t last_pos = cmd.find_last_not_of(" \t\n\r");
+    if (last_pos != std::string::npos) {
+        cmd.erase(last_pos + 1);
+    }
+    return cmd;
+}
+
 int get_next_available_id() {
     if (job_list.empty()) return 1;
-    
-    // Collect all current IDs into a set for quick lookup
     std::set<int> current_ids;
-    for (const auto& job : job_list) {
-        current_ids.insert(job.id);
-    }
-
-    // Find the smallest positive integer not in the set
+    for (const auto& job : job_list) current_ids.insert(job.id);
     int id = 1;
-    while (current_ids.count(id)) {
-        id++;
-    }
+    while (current_ids.count(id)) id++;
     return id;
 }
 
-// --- REAPING LOGIC ---
 void reap_finished_jobs() {
     std::vector<Job> active_jobs;
     for (size_t i = 0; i < job_list.size(); ++i) {
         int status;
-        // Check if process finished
         if (waitpid(job_list[i].pid, &status, WNOHANG) > 0) {
             char marker = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
-            std::string cmd = job_list[i].command;
-            
-            // Clean up command string (remove &)
-            size_t amp = cmd.find_last_of('&');
-            if (amp != std::string::npos) {
-                cmd.erase(amp);
-                cmd.erase(cmd.find_last_not_of(" \t") + 1);
-            }
-            
+            std::string d_cmd = format_cmd_for_display(job_list[i].command, "Done");
             std::cout << "[" << job_list[i].id << "]" << marker << "  " 
-                      << std::left << std::setw(24) << "Done" << cmd << std::endl;
-            // We do NOT add it to active_jobs, so the ID is recycled
+                      << std::left << std::setw(24) << "Done" << d_cmd << std::endl;
         } else {
             active_jobs.push_back(job_list[i]);
         }
@@ -73,7 +67,6 @@ void reap_finished_jobs() {
     job_list = active_jobs;
 }
 
-// --- UTILS ---
 std::vector<std::string> parse_arguments(const std::string& input) {
     std::vector<std::string> args;
     std::string current;
@@ -112,55 +105,8 @@ std::string get_full_path(const std::string& cmd) {
     return "";
 }
 
-// --- COMPLETION LOGIC ---
-std::set<std::string> get_all_matches(const std::string& prefix) {
-    std::set<std::string> matches;
-    for (const auto& b : builtins_list) if (b.find(prefix) == 0) matches.insert(b);
-    char* path_env = std::getenv("PATH");
-    if (path_env) {
-        std::stringstream ss(path_env);
-        std::string dir;
-        while (std::getline(ss, dir, ':')) {
-            if (dir.empty() || !fs::exists(dir)) continue;
-            try {
-                for (const auto& entry : fs::directory_iterator(dir)) {
-                    std::string name = entry.path().filename().string();
-                    if (name.find(prefix) == 0) matches.insert(name);
-                }
-            } catch (...) { continue; }
-        }
-    }
-    return matches;
-}
-
-char* command_generator(const char* text, int state) {
-    static std::vector<std::string> matches;
-    static size_t idx;
-    if (!state) {
-        std::set<std::string> m_set = get_all_matches(text);
-        matches.assign(m_set.begin(), m_set.end());
-        idx = 0;
-    }
-    if (idx < matches.size()) return strdup(matches[idx++].c_str());
-    return nullptr;
-}
-
-char** my_completion(const char* text, int start, int end) {
-    rl_attempted_completion_over = 1;
-    if (start == 0) {
-        std::set<std::string> m_set = get_all_matches(text);
-        if (m_set.empty()) { rl_ding(); return nullptr; }
-        rl_completion_append_character = (m_set.size() > 1) ? '\0' : ' ';
-        return rl_completion_matches(text, command_generator);
-    }
-    return rl_completion_matches(text, rl_filename_completion_function);
-}
-
-// --- MAIN ---
 int main() {
     std::cout << std::unitbuf;
-    rl_attempted_completion_function = my_completion;
-
     while (true) {
         reap_finished_jobs();
         char* line = readline("$ ");
@@ -190,7 +136,6 @@ int main() {
         if (cmd_args.empty()) { free(line); continue; }
         const std::string& command = cmd_args[0];
 
-        // Builtin redirection setup
         int original_stdout = -1, original_stderr = -1;
         bool is_builtin = std::find(builtins_list.begin(), builtins_list.end(), command) != builtins_list.end();
         if (is_builtin) {
@@ -208,19 +153,16 @@ int main() {
 
         if (command == "exit") { free(line); return 0; }
         else if (command == "jobs") {
-            // Update status before printing
             for (auto& job : job_list) {
                 int status;
-                if (job.status == "Running" && waitpid(job.pid, &status, WNOHANG) > 0) {
-                    job.status = "Done";
-                }
+                if (job.status == "Running" && waitpid(job.pid, &status, WNOHANG) > 0) job.status = "Done";
             }
-            // Print and remove "Done" jobs after viewing
             std::vector<Job> active_after_view;
             for (size_t i = 0; i < job_list.size(); ++i) {
                 char marker = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
+                std::string d_cmd = format_cmd_for_display(job_list[i].command, job_list[i].status);
                 std::cout << "[" << job_list[i].id << "]" << marker << "  " 
-                          << std::left << std::setw(24) << job_list[i].status << job_list[i].command << std::endl;
+                          << std::left << std::setw(24) << job_list[i].status << d_cmd << std::endl;
                 if (job_list[i].status == "Running") active_after_view.push_back(job_list[i]);
             }
             job_list = active_after_view;
@@ -271,10 +213,7 @@ int main() {
                         int assigned_id = get_next_available_id();
                         std::cout << "[" << assigned_id << "] " << pid << std::endl;
                         job_list.push_back({assigned_id, pid, raw_cmd, "Running"});
-                        // Sorting helps markers stay consistent with shell behavior
-                        std::sort(job_list.begin(), job_list.end(), [](const Job& a, const Job& b) {
-                            return a.id < b.id;
-                        });
+                        std::sort(job_list.begin(), job_list.end(), [](const Job& a, const Job& b) { return a.id < b.id; });
                     } else waitpid(pid, nullptr, 0);
                 }
             } else std::cout << command << ": command not found" << std::endl;
@@ -286,7 +225,6 @@ int main() {
             dup2(original_stderr, STDERR_FILENO);
             close(original_stdout); close(original_stderr);
         }
-
         free(line);
     }
     return 0;
