@@ -11,14 +11,13 @@
 #include <fstream>
 #include <algorithm>
 #include <cstring>
-#include <iomanip> // Required for std::left and std::setw
+#include <iomanip>
 
 #include <readline/readline.h>
 #include <readline/history.h>
 
 namespace fs = std::filesystem;
 
-// Structure to track background jobs
 struct Job {
     int id;
     pid_t pid;
@@ -29,7 +28,19 @@ struct Job {
 std::vector<Job> job_list;
 std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
-// --- TOKENIZER ---
+// --- UTILS ---
+std::string find_lcp(const std::set<std::string>& matches) {
+    if (matches.empty()) return "";
+    std::string prefix = *matches.begin();
+    for (const auto& s : matches) {
+        while (s.find(prefix) != 0) {
+            prefix = prefix.substr(0, prefix.length() - 1);
+            if (prefix.empty()) return "";
+        }
+    }
+    return prefix;
+}
+
 std::vector<std::string> parse_arguments(const std::string& input) {
     std::vector<std::string> args;
     std::string current;
@@ -58,7 +69,6 @@ std::vector<std::string> parse_arguments(const std::string& input) {
     return args;
 }
 
-// --- PATH UTILS ---
 std::string get_full_path(std::string cmd) {
     char* path_env = std::getenv("PATH");
     if (!path_env) return "";
@@ -74,15 +84,69 @@ std::string get_full_path(std::string cmd) {
     return "";
 }
 
-// --- COMPLETION LOGIC (Simplified for brevity) ---
-char** my_completion(const char* text, int start, int end) {
-    rl_attempted_completion_over = 1;
-    return nullptr; // Tab completion logic remains same as previous stages
+// --- COMPLETION ---
+std::set<std::string> get_all_matches(const std::string& prefix) {
+    std::set<std::string> matches;
+    for (const auto& b : builtins_list) {
+        if (b.compare(0, prefix.length(), prefix) == 0) matches.insert(b);
+    }
+    char* path_env = std::getenv("PATH");
+    if (path_env) {
+        std::stringstream ss(path_env);
+        std::string dir_path;
+        while (std::getline(ss, dir_path, ':')) {
+            if (!fs::exists(dir_path) || !fs::is_directory(dir_path)) continue;
+            try {
+                for (const auto& entry : fs::directory_iterator(dir_path)) {
+                    std::string filename = entry.path().filename().string();
+                    if (filename.compare(0, prefix.length(), prefix) == 0) {
+                        if (fs::is_regular_file(entry) && (fs::status(entry).permissions() & fs::perms::owner_exec) != fs::perms::none)
+                            matches.insert(filename);
+                    }
+                }
+            } catch (...) { continue; }
+        }
+    }
+    return matches;
 }
 
-// --- MAIN SHELL ---
+char* command_generator(const char* text, int state) {
+    static std::vector<std::string> matches;
+    static size_t match_index;
+    if (!state) {
+        std::set<std::string> m_set = get_all_matches(text);
+        matches.assign(m_set.begin(), m_set.end());
+        match_index = 0;
+    }
+    if (match_index < matches.size()) {
+        char* res = (char*)malloc(matches[match_index].length() + 1);
+        std::strcpy(res, matches[match_index++].c_str());
+        return res;
+    }
+    return nullptr;
+}
+
+char** my_completion(const char* text, int start, int end) {
+    rl_completion_append_character = ' ';
+    if (start == 0) {
+        std::set<std::string> m_set = get_all_matches(text);
+        if (m_set.empty()) { rl_ding(); rl_attempted_completion_over = 1; return nullptr; }
+        
+        std::string lcp = find_lcp(m_set);
+        if (m_set.size() > 1) {
+            rl_completion_append_character = '\0';
+            if (lcp == text) rl_ding(); 
+        }
+        rl_attempted_completion_over = 1;
+        return rl_completion_matches(text, command_generator);
+    }
+    return rl_completion_matches(text, rl_filename_completion_function);
+}
+
+// --- MAIN ---
 int main() {
     std::cout << std::unitbuf;
+    rl_attempted_completion_function = my_completion;
     int next_job_id = 1;
 
     while (true) {
@@ -97,11 +161,9 @@ int main() {
         if (args.empty()) continue;
 
         bool is_background = (args.back() == "&");
-        std::string original_cmd = input; // Keep for the jobs list
-        
+        std::string original_input = input;
         if (is_background) args.pop_back();
 
-        // Redirection Parsing
         std::string out_f = "", err_f = "";
         bool out_app = false, err_app = false;
         std::vector<std::string> cmd_args;
@@ -115,35 +177,30 @@ int main() {
 
         if (cmd_args.empty()) continue;
 
-        // Ensure redirection files exist
+        // Ensure files exist for all commands
         if (!out_f.empty()) std::ofstream(out_f, out_app ? std::ios::app : std::ios::out).close();
         if (!err_f.empty()) std::ofstream(err_f, err_app ? std::ios::app : std::ios::out).close();
 
         std::string command = cmd_args[0];
-
-        // Builtin Logic Helper
-        auto get_out_stream = [&](std::ofstream &f) -> std::ostream* {
+        auto get_out = [&](std::ofstream &f) -> std::ostream* {
             if (!out_f.empty()) { f.open(out_f, out_app ? std::ios::app : std::ios::out); return &f; }
             return &std::cout;
         };
 
         if (command == "exit") return 0;
         else if (command == "jobs") {
-            std::ofstream f; std::ostream* out = get_out_stream(f);
+            std::ofstream f; std::ostream* out = get_out(f);
             for (const auto& job : job_list) {
-                // Format: [1]+  Running                 sleep 10 &
-                *out << "[" << job.id << "]+  " 
-                     << std::left << std::setw(24) << "Running" 
-                     << job.command << std::endl;
+                *out << "[" << job.id << "]+  " << std::left << std::setw(24) << "Running" << job.command << std::endl;
             }
         }
         else if (command == "echo") {
-            std::ofstream f; std::ostream* out = get_out_stream(f);
+            std::ofstream f; std::ostream* out = get_out(f);
             for (size_t i = 1; i < cmd_args.size(); ++i) *out << cmd_args[i] << (i == cmd_args.size()-1 ? "" : " ");
             *out << std::endl;
         }
         else if (command == "type") {
-            std::ofstream f; std::ostream* out = get_out_stream(f);
+            std::ofstream f; std::ostream* out = get_out(f);
             std::string target = cmd_args[1];
             if (std::find(builtins_list.begin(), builtins_list.end(), target) != builtins_list.end())
                 *out << target << " is a shell builtin" << std::endl;
@@ -154,7 +211,7 @@ int main() {
             }
         }
         else if (command == "pwd") {
-            std::ofstream f; std::ostream* out = get_out_stream(f);
+            std::ofstream f; std::ostream* out = get_out(f);
             *out << fs::current_path().string() << std::endl;
         }
         else if (command == "cd") {
@@ -184,10 +241,8 @@ int main() {
                 } else {
                     if (is_background) {
                         std::cout << "[" << next_job_id << "] " << pid << std::endl;
-                        job_list.push_back({next_job_id++, pid, original_cmd, "Running"});
-                    } else {
-                        waitpid(pid, nullptr, 0);
-                    }
+                        job_list.push_back({next_job_id++, pid, original_input, "Running"});
+                    } else waitpid(pid, nullptr, 0);
                 }
             } else std::cout << command << ": command not found" << std::endl;
         }
