@@ -1,7 +1,6 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <set>
 #include <sstream>
 #include <filesystem>
 #include <cstdlib>
@@ -10,7 +9,6 @@
 #include <fcntl.h>
 #include <algorithm>
 #include <cstring>
-
 #include <readline/readline.h>
 #include <readline/history.h>
 
@@ -44,7 +42,7 @@ std::vector<std::string> tokenize(const std::string& s) {
     return tokens;
 }
 
-// --- AUTOCOMPLETE (Directory Logic for #LC6) ---
+// --- AUTOCOMPLETE ENGINE ---
 char* generator(const char* text, int state) {
     static std::vector<std::string> matches;
     static size_t idx;
@@ -78,10 +76,13 @@ char** completion(const char* text, int start, int end) {
     return matches;
 }
 
-// --- COMMAND EXECUTION ---
-// This runs inside a child process for external commands
+// --- EXECUTION LOGIC ---
 void exec_cmd_external(std::vector<std::string> args) {
     if (args.empty()) exit(0);
+    if (args[0] == "pwd") {
+        std::cout << fs::current_path().string() << std::endl;
+        exit(0);
+    }
     std::string full = get_path(args[0]);
     if (full.empty()) {
         std::cerr << args[0] << ": command not found" << std::endl;
@@ -94,7 +95,7 @@ void exec_cmd_external(std::vector<std::string> args) {
     exit(1);
 }
 
-// --- PIPELINE ENGINE ---
+// --- PIPELINE ENGINE (Fixed for #XK3) ---
 void run_pipeline(const std::string& line) {
     std::vector<std::string> stages;
     std::stringstream ss(line);
@@ -102,7 +103,7 @@ void run_pipeline(const std::string& line) {
     while (std::getline(ss, seg, '|')) stages.push_back(seg);
 
     int n = stages.size();
-    int prev_pipe_read = -1;
+    int prev_read = -1;
     std::vector<pid_t> pids;
 
     for (int i = 0; i < n; i++) {
@@ -113,14 +114,12 @@ void run_pipeline(const std::string& line) {
 
         pid_t pid = fork();
         if (pid == 0) {
-            // Setup Input
             if (i > 0) {
-                dup2(prev_pipe_read, STDIN_FILENO);
-                close(prev_pipe_read);
+                dup2(prev_read, STDIN_FILENO);
+                close(prev_read);
             }
-            // Setup Output
             if (i < n - 1) {
-                close(fds[0]); // Child doesn't read from its own pipe
+                close(fds[0]);
                 dup2(fds[1], STDOUT_FILENO);
                 close(fds[1]);
             }
@@ -128,33 +127,28 @@ void run_pipeline(const std::string& line) {
             std::vector<std::string> args = tokenize(stages[i]);
             if (args.empty()) exit(0);
 
-            // Handle built-ins inside the pipe stage
-            if (args[0] == "pwd") {
-                std::cout << fs::current_path().string() << std::endl;
-                exit(0);
-            } else if (args[0] == "echo") {
+            if (args[0] == "echo") {
                 for (size_t k = 1; k < args.size(); ++k) 
                     std::cout << args[k] << (k == args.size()-1 ? "" : " ");
                 std::cout << std::endl;
                 exit(0);
             }
-            
             exec_cmd_external(args);
         }
 
-        // Parent cleanup
-        if (prev_pipe_read != -1) close(prev_pipe_read);
+        if (prev_read != -1) close(prev_read);
         if (i < n - 1) {
-            close(fds[1]); // Parent doesn't write to the pipe
-            prev_pipe_read = fds[0];
+            close(fds[1]); // CRITICAL: Parent must close write-end
+            prev_read = fds[0];
         }
         pids.push_back(pid);
     }
 
+    // Wait for all stages to finish before printing prompt
     for (pid_t p : pids) waitpid(p, nullptr, 0);
 }
 
-// --- MAIN LOOP ---
+// --- MAIN ---
 int main() {
     std::cout << std::unitbuf;
     rl_attempted_completion_function = completion;
@@ -173,7 +167,6 @@ int main() {
             std::vector<std::string> args = tokenize(input);
             if (args.empty()) { free(line); continue; }
 
-            // Parent-level built-ins (must affect shell state)
             if (args[0] == "cd") {
                 std::string path = args.size() > 1 ? args[1] : std::getenv("HOME");
                 if (chdir(path.c_str()) != 0) std::cerr << "cd: " << path << ": No such file" << std::endl;
@@ -182,10 +175,7 @@ int main() {
             } else {
                 pid_t pid = fork();
                 if (pid == 0) {
-                    if (args[0] == "pwd") {
-                        std::cout << fs::current_path().string() << std::endl;
-                        exit(0);
-                    } else if (args[0] == "echo") {
+                    if (args[0] == "echo") {
                         for (size_t k = 1; k < args.size(); ++k) 
                             std::cout << args[k] << (k == args.size()-1 ? "" : " ");
                         std::cout << std::endl;
