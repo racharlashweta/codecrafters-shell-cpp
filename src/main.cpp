@@ -9,6 +9,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <fstream>
+#include <algorithm>
+#include <cstring>
 
 // Readline headers
 #include <readline/readline.h>
@@ -16,13 +18,10 @@
 
 namespace fs = std::filesystem;
 
-// Global set of builtins for the completion generator
+// List of builtins for autocompletion
 std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd"};
 
-// --- COMPLETION LOGIC ---
-
-// This function is called repeatedly by readline to find matches.
-// 'state' is 0 on the first call, and non-zero on subsequent calls for the same text.
+// --- COMPLETION GENERATOR ---
 char* command_generator(const char* text, int state) {
     static size_t list_index, len;
     std::string name(text);
@@ -35,29 +34,34 @@ char* command_generator(const char* text, int state) {
     while (list_index < builtins_list.size()) {
         std::string cur = builtins_list[list_index++];
         if (cur.compare(0, len, name) == 0) {
-            // Readline expects a dynamically allocated C-string
+            // Readline will free this memory
             char* res = (char*)malloc(cur.length() + 1);
-            strcpy(res, cur.c_str());
+            std::strcpy(res, cur.c_str());
             return res;
         }
     }
     return nullptr;
 }
 
-// Hook that tells readline to use our generator
+// --- COMPLETION HOOK ---
 char** my_completion(const char* text, int start, int end) {
-    // rl_attempted_completion_over = 1 prevents readline from 
-    // falling back to filename completion if no builtins match.
-    rl_attempted_completion_over = 1;
-    return rl_completion_matches(text, command_generator);
+    // Only attempt completion if we are at the start of the line (the command)
+    if (start == 0) {
+        rl_attempted_completion_over = 1;
+        return rl_completion_matches(text, command_generator);
+    }
+    // Return nullptr for arguments to allow default filename completion 
+    // or no completion at all.
+    return nullptr; 
 }
 
-// --- TOKENIZER & PATH SEARCH (Same as previous stages) ---
+// --- TOKENIZER (Handles quotes and escapes) ---
 std::vector<std::string> parse_arguments(const std::string& input) {
     std::vector<std::string> args;
     std::string current_arg;
     bool in_single_quotes = false;
     bool in_double_quotes = false;
+
     for (size_t i = 0; i < input.length(); ++i) {
         char c = input[i];
         if (c == '\\' && !in_single_quotes && !in_double_quotes) {
@@ -67,8 +71,9 @@ std::vector<std::string> parse_arguments(const std::string& input) {
         if (c == '\\' && in_double_quotes) {
             if (i + 1 < input.length()) {
                 char next = input[i + 1];
-                if (next == '\"' || next == '\\' || next == '$') { current_arg += next; i++; }
-                else current_arg += c;
+                if (next == '\"' || next == '\\' || next == '$') {
+                    current_arg += next; i++;
+                } else current_arg += c;
             } else current_arg += c;
             continue;
         }
@@ -98,32 +103,26 @@ std::string get_path(std::string command) {
 }
 
 int main() {
-    // Setup Readline
+    // Initialize Readline completion
     rl_attempted_completion_function = my_completion;
 
     while (true) {
-        // readline() prints the prompt and handles the input loop
         char* line = readline("$ ");
-        
-        if (!line) break; // Handle Ctrl+D
+        if (!line) break; // Exit on Ctrl+D
         
         std::string input(line);
         if (input.empty()) {
             free(line);
             continue;
         }
-        
-        // Add to history (standard shell behavior)
         add_history(line);
 
         std::vector<std::string> args = parse_arguments(input);
-        free(line); // Done with the raw C-string
-        
+        free(line);
+
         if (args.empty()) continue;
 
-        // --- THE REST OF YOUR LOGIC (Redirection, Builtins, External Programs) ---
-        // (Include all the logic from the previous Append/Stderr stages here)
-        
+        // --- REDIRECTION PARSING (Combined logic) ---
         std::string stdout_file = "";
         std::string stderr_file = "";
         bool stdout_append = false;
@@ -146,9 +145,11 @@ int main() {
         if (redirect_idx != -1) cmd_args.erase(cmd_args.begin() + redirect_idx, cmd_args.end());
         std::string command = cmd_args[0];
 
+        // Ensure files exist for builtins/externals
         if (!stdout_file.empty()) { std::ofstream(stdout_file, std::ios::app); }
         if (!stderr_file.empty()) { std::ofstream(stderr_file, std::ios::app); }
 
+        // --- EXECUTION ---
         if (command == "exit") return 0;
         else if (command == "echo") {
             std::ostream* out = &std::cout;
@@ -162,18 +163,6 @@ int main() {
             }
             *out << "\n";
         }
-        else if (command == "pwd") {
-            if (!stdout_file.empty()) {
-                std::ofstream out(stdout_file, stdout_append ? std::ios::app : std::ios::out);
-                out << fs::current_path().string() << "\n";
-            } else std::cout << fs::current_path().string() << "\n";
-        }
-        else if (command == "cd") {
-            std::string path = cmd_args.size() > 1 ? cmd_args[1] : "";
-            if (path == "~") path = std::getenv("HOME");
-            if (fs::exists(path) && fs::is_directory(path)) fs::current_path(path);
-            else std::cout << "cd: " << path << ": No such file or directory\n";
-        }
         else if (command == "type") {
             std::string target = cmd_args[1];
             if (std::find(builtins_list.begin(), builtins_list.end(), target) != builtins_list.end()) {
@@ -183,7 +172,16 @@ int main() {
                 if (!p.empty()) std::cout << target << " is " << p << "\n";
                 else std::cout << target << ": not found\n";
             }
-        } 
+        }
+        else if (command == "pwd") {
+            std::cout << fs::current_path().string() << "\n";
+        }
+        else if (command == "cd") {
+            std::string path = cmd_args.size() > 1 ? cmd_args[1] : "";
+            if (path == "~") path = std::getenv("HOME");
+            if (fs::exists(path)) fs::current_path(path);
+            else std::cout << "cd: " << path << ": No such file or directory\n";
+        }
         else {
             std::string full_path = get_path(command);
             if (!full_path.empty()) {
@@ -205,7 +203,9 @@ int main() {
                     execvp(c_args[0], c_args.data());
                     exit(1);
                 } else wait(nullptr);
-            } else std::cout << command << ": command not found\n";
+            } else {
+                std::cout << command << ": command not found\n";
+            }
         }
     }
     return 0;
