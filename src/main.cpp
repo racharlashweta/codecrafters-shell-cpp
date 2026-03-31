@@ -1,165 +1,523 @@
+#include <complex>
 #include <iostream>
+#include <ranges>
 #include <string>
-#include <vector>
 #include <sstream>
+#include <unistd.h>
+#include <vector>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <filesystem>
 #include <cstdlib>
-#include <sys/wait.h>
-#include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>
+#include <termios.h>
+#include <unordered_set>
 #include <algorithm>
-#include <cstring>
 
-#include <readline/readline.h>
-#include <readline/history.h>
+termios orig_termios;
 
-namespace fs = std::filesystem;
+void enable_raw_mode() {
+    tcgetattr(STDIN_FILENO, &orig_termios);
+    termios raw = orig_termios;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
 
-// --- GLOBALS & CONSTANTS ---
-const std::vector<std::string> builtins = {"echo", "exit", "type", "pwd", "cd"};
+void disable_raw_mode() {
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+}
 
-// --- PATH RESOLUTION ---
-std::string get_path(const std::string& cmd) {
-    if (cmd.find('/') != std::string::npos) return fs::exists(cmd) ? cmd : "";
-    char* env = std::getenv("PATH");
-    if (!env) return "";
-    std::stringstream ss(env);
+const std::vector<std::string> builtins = {
+    "echo", "exit", "type", "pwd", "cd"
+};
+
+void redraw(const std::string& line) {
+    std::cout << "\r\033[K$ " << line << std::flush;
+}
+
+std::vector<std::string> split_path_env() {
+    std::vector<std::string> paths;
+    const char* env = std::getenv("PATH");
+    if (!env)
+        return paths;
+
+    std::string path_env(env);
+    std::stringstream ss(path_env);
     std::string dir;
-    while (std::getline(ss, dir, ':')) {
-        fs::path p = fs::path(dir) / cmd;
-        if (fs::exists(p)) return p.string();
-    }
-    return "";
+
+    while (std::getline(ss, dir, ':'))
+        if (!dir.empty())
+            paths.push_back(dir);
+
+    return paths;
 }
 
-// --- TOKENIZER (Handles spaces correctly) ---
-std::vector<std::string> tokenize(const std::string& s) {
-    std::vector<std::string> tokens;
-    std::stringstream ss(s);
-    std::string word;
-    while (ss >> word) tokens.push_back(word);
-    return tokens;
-}
-
-// --- AUTOCOMPLETE (Fixed for Directories) ---
-char* generator(const char* text, int state) {
-    static std::vector<std::string> matches;
-    static size_t idx;
-    if (!state) {
-        matches.clear(); idx = 0;
-        std::string pref(text);
-        for (const auto& b : builtins) if (b.find(pref) == 0) matches.push_back(b);
-        try {
-            for (const auto& entry : fs::directory_iterator(".")) {
-                std::string name = entry.path().filename().string();
-                if (name == "." || name == "..") continue;
-                if (name.find(pref) == 0) {
-                    if (fs::is_directory(entry.path())) name += "/";
-                    matches.push_back(name);
-                }
-            }
-        } catch (...) {}
-        std::sort(matches.begin(), matches.end());
-        matches.erase(std::unique(matches.begin(), matches.end()), matches.end());
-    }
-    return (idx < matches.size()) ? strdup(matches[idx++].c_str()) : nullptr;
-}
-
-char** completion(const char* text, int start, int end) {
-    rl_attempted_completion_over = 1;
-    rl_completion_append_character = ' ';
-    char** matches = rl_completion_matches(text, generator);
-    if (matches && matches[0] && matches[1] == nullptr) {
-        if (std::string(matches[0]).back() == '/') rl_completion_append_character = '\0';
+std::vector<std::string> complete_builtins(const std::string& prefix) {
+    std::vector<std::string> matches;
+    for (const auto& cmd : builtins) {
+        if (cmd.compare(0, prefix.size(), prefix) == 0) {
+            matches.push_back(cmd);
+        }
     }
     return matches;
 }
 
-// --- CORE EXECUTION ---
-void run_command(std::vector<std::string> args) {
-    if (args.empty()) return;
-    if (args[0] == "exit") exit(0);
-    if (args[0] == "cd") {
-        std::string path = args.size() > 1 ? args[1] : std::getenv("HOME");
-        if (chdir(path.c_str()) != 0) std::cerr << "cd: " << path << ": No such file" << std::endl;
-        return;
+std::vector<std::string> complete_files(const std::string& prefix) {
+    std::vector<std::string> matches;
+    DIR* dir = opendir(".");
+    if (!dir) return matches;
+    dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        std::string name = entry->d_name;
+        if (name.starts_with(prefix))
+            matches.push_back(name);
     }
-    if (args[0] == "pwd") {
-        std::cout << fs::current_path().string() << std::endl;
-        return;
-    }
-    if (args[0] == "echo") {
-        for (size_t i = 1; i < args.size(); ++i) std::cout << args[i] << (i == args.size()-1 ? "" : " ");
-        std::cout << std::endl;
-        return;
-    }
-
-    std::string full = get_path(args[0]);
-    if (full.empty()) {
-        std::cerr << args[0] << ": command not found" << std::endl;
-        exit(1);
-    }
-    std::vector<char*> c_args;
-    for (auto& a : args) c_args.push_back(const_cast<char*>(a.c_str()));
-    c_args.push_back(nullptr);
-    execvp(full.c_str(), c_args.data());
-    exit(1);
+    closedir(dir);
+    return matches;
 }
 
-// --- PIPELINE ENGINE (The Fix for #XK3) ---
-void run_pipeline(const std::string& line) {
-    std::vector<std::string> stages;
-    std::stringstream ss(line);
-    std::string seg;
-    while (std::getline(ss, seg, '|')) stages.push_back(seg);
+std::vector<std::string> complete_executables(const std::string& prefix) {
+    std::vector<std::string> matches;
+    auto paths = split_path_env();
 
-    int n = stages.size();
-    int pipefds[2 * (n - 1)];
-    for (int i = 0; i < n - 1; i++) pipe(pipefds + i * 2);
+    for (const auto& dir : paths) {
+        DIR* d = opendir(dir.c_str());
+        if (!d)
+            continue;
 
-    std::vector<pid_t> pids;
-    for (int i = 0; i < n; i++) {
-        pid_t pid = fork();
-        if (pid == 0) {
-            if (i > 0) dup2(pipefds[(i - 1) * 2], STDIN_FILENO);
-            if (i < n - 1) dup2(pipefds[i * 2 + 1], STDOUT_FILENO);
-            for (int j = 0; j < 2 * (n - 1); j++) close(pipefds[j]);
-            run_command(tokenize(stages[i]));
-            exit(0);
+        dirent* entry;
+        while ((entry = readdir(d)) != nullptr) {
+            std::string name = entry->d_name;
+
+            if (name.compare(0, prefix.size(), prefix) != 0)
+                continue;
+
+            std::string full_path = dir + "/" + name;
+
+            if (access(full_path.c_str(),X_OK) == 0)
+                matches.push_back(name);
         }
-        pids.push_back(pid);
+        closedir(d);
+    }
+    return matches;
+}
+
+std::string longest_common_prefix(const std::vector<std::string>& matches) {
+    if (matches.empty())
+        return "";
+
+    std::string prefix = matches[0];
+    for (size_t i = 0; i < matches.size(); ++i) {
+        size_t j = 0;
+        while (j < prefix.size() && j < matches[i].size() && prefix[j] == matches[i][j])
+            ++j;
+        prefix = prefix.substr(0, j);
+        if (prefix.empty())
+            break;
+    }
+    return prefix;
+}
+
+std::string read_line() {
+    std::string line;
+    char c;
+    bool tab_pressed = false;
+
+    redraw(line);
+
+    while (true) {
+        ssize_t n = read(STDIN_FILENO, &c, 1);
+        if (n <= 0)
+            return "";
+
+        if (c != '\t')
+            tab_pressed = false;
+
+        if (c == '\n') {
+            std::cout << '\n';
+            break;
+        }
+
+        if (c == 127 || c == '\b') {
+            if (!line.empty()) {
+                line.pop_back();
+                redraw(line);
+            }
+            continue;
+        }
+
+        if (c == '\t') {
+            size_t pos = line.size();
+            while (pos > 0 && line[pos - 1] != ' ')
+                pos--;
+
+            bool first_word = (pos == 0);
+            std::string current = line.substr(pos);
+            std::vector<std::string> matches;
+
+            if (first_word) {
+                std::unordered_set<std::string> seen;
+                auto built_ins = complete_builtins(current);
+                for (const auto& b : built_ins) {
+                    seen.insert(b);
+                    matches.push_back(b);
+                }
+                auto execs = complete_executables(current);
+                for (const auto& e : execs) {
+                    if (!seen.contains(e))
+                        matches.push_back(e);
+                }
+            } else {
+                if (current.empty()) {
+                    std::cout << '\x07' << std::flush;
+                    tab_pressed = false;
+                    continue;
+                }
+                matches = complete_files(current);
+            }
+
+            std::ranges::sort(matches.begin(), matches.end());
+
+            if (matches.empty()) {
+                std::cout << '\x07' << std::flush;
+                tab_pressed = false;
+                continue;
+            }
+
+            if (matches.size() == 1) {
+                line.erase(pos);
+                line += matches[0];
+                line += " ";
+                redraw(line);
+            }
+
+            std::string lcp = longest_common_prefix(matches);
+
+            if (lcp.size() > current.size()) {
+                line.erase(pos);
+                line += lcp;
+
+                if (matches.size() == 1)
+                    line += " ";
+
+                redraw(line);
+                tab_pressed = false;
+                continue;
+            }
+
+            if (!tab_pressed) {
+                std::cout << '\x07' << std::flush;
+                tab_pressed = true;
+                continue;
+            }
+
+            std::cout << "\n";
+            for (const auto& m : matches)
+                std::cout << m << "  ";
+            std::cout << "\n";
+            redraw(line);
+            tab_pressed = false;
+
+            continue;
+        }
+
+        line.push_back(c);
+        redraw(line);
     }
 
-    for (int i = 0; i < 2 * (n - 1); i++) close(pipefds[i]);
-    for (pid_t p : pids) waitpid(p, nullptr, 0);
+    return line;
+}
+
+std::vector<std::string> parse_input(const std::string& line) {
+    std::vector<std::string> tokens;
+    std::string current_token;
+    char quote_char = 0;
+    bool token_started = false;
+
+    for (size_t i = 0; i < line.length(); i++) {
+        char c = line[i];
+
+        if (quote_char == 0) {
+            if (c == '\\') {
+                if (i + 1 < line.length()) {
+                    current_token += line[i + 1];
+                    i++;
+                    token_started = true;
+                }
+            }
+            else if (c == '\'' || c == '"') {
+                quote_char = c;
+                token_started = true;
+            }
+            else if (c == ' ') {
+                if (token_started) {
+                    tokens.push_back(current_token);
+                    current_token.clear();
+                    token_started = false;
+                }
+            }
+            else {
+                current_token += c;
+                token_started = true;
+            }
+        }
+        else if (quote_char == '\'') {
+            if (c == '\'') {
+                quote_char = 0;
+            } else {
+                current_token += c;
+            }
+        }
+        else {
+            if (c == '"') {
+                quote_char = 0;
+            }
+            else if (c == '\\') {
+                if (i + 1 < line.length()) {
+                    char next = line[i + 1];
+                    if (next == '\\' || next == '"' || next == '$' || next == '\n') {
+                         current_token += next;
+                         i++;
+                    } else {
+                        current_token += c;
+                    }
+                } else {
+                    current_token += c;
+                }
+            }
+            else {
+                current_token += c;
+            }
+        }
+    }
+    if (token_started) {
+        tokens.push_back(current_token);
+    }
+    return tokens;
+}
+
+bool is_builtin(const std::string& command) {
+    return command == "echo" || command == "exit" || command == "type"
+        || command == "pwd" || command == "cd";
+}
+
+void run_builtin(const std::vector<std::string>& args)
+{
+    std::string out;
+    const std::string& command = args[0];
+
+    if (command == "echo") {
+        for (size_t i = 1; i < args.size(); i++) {
+            if (i > 1)
+                std::cout << " ";
+            out += args[i];
+        }
+        out += "\n";
+    }
+    else if (command == "pwd") {
+        out = std::filesystem::current_path().string() + "\n";
+    }
+    else if (command == "type") {
+        if (args.size() < 2)
+            return;
+        const std::string& target = args[1];
+        if (is_builtin(target))
+        {
+            out = target + " is a shell builtin\n";
+        } else {
+            out = target + ": not found\n";
+        }
+    }
+    write(STDOUT_FILENO, out.c_str(), out.size());
+}
+
+std::vector<char*> to_argv(const std::vector<std::string>& v) {
+    std::vector<char*> res;
+    for (const auto& s : v)
+        res.push_back(const_cast<char*>(s.c_str()));
+    res.push_back(nullptr);
+    return res;
 }
 
 int main() {
     std::cout << std::unitbuf;
-    rl_attempted_completion_function = completion;
-    rl_basic_word_break_characters = " \t\n\"\\'`@$><=;|&{(";
+    std::cerr << std::unitbuf;
+    std::string line;
+    std::string command;
+    enable_raw_mode();
 
     while (true) {
-        char* line = readline("$ ");
-        if (!line) break;
-        if (strlen(line) == 0) { free(line); continue; }
-        add_history(line);
+        line = read_line();
+        if (line.empty())
+            continue;
 
-        std::string input(line);
-        if (input.find('|') != std::string::npos) {
-            run_pipeline(input);
-        } else {
-            std::vector<std::string> args = tokenize(input);
-            // Handle built-ins in the parent process if no pipe
-            if (!args.empty() && (args[0] == "cd" || args[0] == "exit")) {
-                run_command(args);
-            } else {
-                pid_t pid = fork();
-                if (pid == 0) run_command(args);
-                else waitpid(pid, nullptr, 0);
+        std::vector<std::string> args = parse_input(line);
+        if (args.empty()) continue;
+
+        std::vector<std::vector<std::string>> commands;
+        std::vector<std::string> current;
+
+        for (const auto& arg : args) {
+            if (arg == "|") {
+                commands.push_back(current);
+                current.clear();
             }
+            else
+                current.push_back(arg);
         }
-        free(line);
+        commands.push_back(current);
+
+        if (commands.size() == 1) {
+            std::string cmd = args[0];
+
+            bool write_into_file = false;
+            std::string file;
+            int saved = dup(1);
+            if (args.size() > 2)
+                if (args[args.size() - 2]  == ">" ||
+                    args[args.size() - 2]  == "1>" ||
+                    args[args.size() - 2]  == "2>" ||
+                    args[args.size() - 2]  == ">>" ||
+                    args[args.size() - 2]  == "1>>" ||
+                    args[args.size() - 2]  == "2>>") {
+                    write_into_file = true;
+                    file = args[args.size() - 1];
+                    int file_fd;
+
+                    if (args[args.size() - 2].contains(">>"))
+                        file_fd = open(file.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+                    else
+                        file_fd = open(file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+                    if (args[args.size() - 2].contains("2"))
+                        dup2(file_fd, 2);
+                    else
+                        dup2(file_fd, 1);
+
+                    close(file_fd);
+                    args.pop_back();
+                    args.pop_back();
+                    }
+
+            if (cmd == "echo") {
+                for (size_t i = 1; i < args.size(); i++) {
+                    if (i > 1)
+                        std::cout << " ";
+                    std::cout << args[i];
+                }
+                std::cout << "\n";
+            }
+
+            else if (cmd == "exit") {
+                disable_raw_mode();
+                return 0;
+            }
+
+            else if (cmd == "type") {
+                if (args.size() < 2)
+                    continue;
+                const std::string& command_to_know = args[1];
+                bool found = false;
+
+                for (const auto& b : builtins)
+                    if (b == command_to_know) {
+                        std::cout << command_to_know << " is a shell builtin\n";
+                        found = true;
+                    }
+
+                if (!found) {
+                    std::string path_env = std::getenv("PATH");
+                    std::stringstream ss_path(path_env);
+                    std::string path;
+                    while (std::getline(ss_path, path, ':')) {
+                        std::string full_path = path + '/' + command_to_know;
+                        if (access(full_path.c_str(), X_OK) == 0) {
+                            std::cout << command_to_know << " is " << full_path << "\n";
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (!found)
+                    std::cout << command_to_know << ": not found\n";
+            }
+
+            else if (cmd == "pwd") {
+                std::cout << std::filesystem::current_path().string() << "\n";
+            }
+
+            else if (cmd == "cd") {
+                const char* target = nullptr;
+                const char* home = std::getenv("HOME");
+
+                if (args.size() < 2) {
+                    target = home;
+                    if (!target)
+                        target = "/";
+                } else if (args[1] == "~")
+                    target = home;
+                else
+                    target = args[1].c_str();
+                if (chdir(target) != 0)
+                    std::cout << "cd: " << target << ": No such file or directory\n";
+            } else {
+                std::vector<char*> c_args;
+                for (auto &a : args)
+                    c_args.push_back(&a[0]);
+                c_args.push_back(nullptr);
+
+                pid_t pid = fork();
+                if (pid == 0) {
+                    execvp(cmd.c_str(), c_args.data());
+                    std::cout << cmd << ": command not found\n";
+                    exit(1);
+                } else {
+                    wait(nullptr);
+                }
+            }
+
+            if (write_into_file) {
+                dup2(saved, 1);
+                close(saved);
+            }
+        } else {
+            int n = commands.size();
+            std::vector<int> pipes(2 *(n - 1));
+
+            for (int i = 0; i < n - 1; i++) {
+                pipe(&pipes[2 * i]);
+            }
+
+            for (int i = 0; i < n; i++) {
+                pid_t pid = fork();
+
+                if (pid == 0) {
+                    if (i > 0)
+                        dup2(pipes[(i - 1) * 2], STDIN_FILENO);
+
+                    if (i < n - 1)
+                        dup2(pipes[i * 2 + 1],STDOUT_FILENO);
+
+                    for (int fd : pipes)
+                        close(fd);
+
+                    if (is_builtin(commands[i][0])) {
+                        run_builtin(commands[i]);
+                        _exit(0);
+                    } else {
+                        auto argv = to_argv(commands[i]);
+                        execvp(argv[0], argv.data());
+                        _exit(1);
+                    }
+                }
+            }
+            for (int fd : pipes)
+                close(fd);
+            for (int i = 0; i < n; i++)
+                wait(nullptr);
+        }
     }
-    return 0;
 }
