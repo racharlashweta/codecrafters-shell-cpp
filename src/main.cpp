@@ -28,21 +28,44 @@ struct Job {
 std::vector<Job> job_list;
 const std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
+// --- ID RECYCLING LOGIC ---
+int get_next_available_id() {
+    if (job_list.empty()) return 1;
+    
+    // Collect all current IDs into a set for quick lookup
+    std::set<int> current_ids;
+    for (const auto& job : job_list) {
+        current_ids.insert(job.id);
+    }
+
+    // Find the smallest positive integer not in the set
+    int id = 1;
+    while (current_ids.count(id)) {
+        id++;
+    }
+    return id;
+}
+
 // --- REAPING LOGIC ---
 void reap_finished_jobs() {
     std::vector<Job> active_jobs;
     for (size_t i = 0; i < job_list.size(); ++i) {
         int status;
+        // Check if process finished
         if (waitpid(job_list[i].pid, &status, WNOHANG) > 0) {
             char marker = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
             std::string cmd = job_list[i].command;
+            
+            // Clean up command string (remove &)
             size_t amp = cmd.find_last_of('&');
             if (amp != std::string::npos) {
                 cmd.erase(amp);
                 cmd.erase(cmd.find_last_not_of(" \t") + 1);
             }
+            
             std::cout << "[" << job_list[i].id << "]" << marker << "  " 
                       << std::left << std::setw(24) << "Done" << cmd << std::endl;
+            // We do NOT add it to active_jobs, so the ID is recycled
         } else {
             active_jobs.push_back(job_list[i]);
         }
@@ -137,7 +160,6 @@ char** my_completion(const char* text, int start, int end) {
 int main() {
     std::cout << std::unitbuf;
     rl_attempted_completion_function = my_completion;
-    int next_job_id = 1;
 
     while (true) {
         reap_finished_jobs();
@@ -168,10 +190,9 @@ int main() {
         if (cmd_args.empty()) { free(line); continue; }
         const std::string& command = cmd_args[0];
 
-        // --- BUILTIN REDIRECTION WRAPPER ---
+        // Builtin redirection setup
         int original_stdout = -1, original_stderr = -1;
         bool is_builtin = std::find(builtins_list.begin(), builtins_list.end(), command) != builtins_list.end();
-
         if (is_builtin) {
             original_stdout = dup(STDOUT_FILENO);
             original_stderr = dup(STDERR_FILENO);
@@ -187,23 +208,22 @@ int main() {
 
         if (command == "exit") { free(line); return 0; }
         else if (command == "jobs") {
-            std::vector<Job> updated;
-            for (size_t i = 0; i < job_list.size(); ++i) {
+            // Update status before printing
+            for (auto& job : job_list) {
                 int status;
-                if (job_list[i].status == "Running" && waitpid(job_list[i].pid, &status, WNOHANG) > 0) {
-                    job_list[i].status = "Done";
-                    size_t amp = job_list[i].command.find_last_of('&');
-                    if (amp != std::string::npos) {
-                        job_list[i].command.erase(amp);
-                        job_list[i].command.erase(job_list[i].command.find_last_not_of(" \t") + 1);
-                    }
+                if (job.status == "Running" && waitpid(job.pid, &status, WNOHANG) > 0) {
+                    job.status = "Done";
                 }
+            }
+            // Print and remove "Done" jobs after viewing
+            std::vector<Job> active_after_view;
+            for (size_t i = 0; i < job_list.size(); ++i) {
                 char marker = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
                 std::cout << "[" << job_list[i].id << "]" << marker << "  " 
                           << std::left << std::setw(24) << job_list[i].status << job_list[i].command << std::endl;
-                if (job_list[i].status == "Running") updated.push_back(job_list[i]);
+                if (job_list[i].status == "Running") active_after_view.push_back(job_list[i]);
             }
-            job_list = updated;
+            job_list = active_after_view;
         }
         else if (command == "type") {
             if (cmd_args.size() >= 2) {
@@ -248,21 +268,23 @@ int main() {
                     exit(1);
                 } else {
                     if (is_bg) {
-                        std::cout << "[" << next_job_id << "] " << pid << std::endl;
-                        job_list.push_back({next_job_id++, pid, raw_cmd, "Running"});
+                        int assigned_id = get_next_available_id();
+                        std::cout << "[" << assigned_id << "] " << pid << std::endl;
+                        job_list.push_back({assigned_id, pid, raw_cmd, "Running"});
+                        // Sorting helps markers stay consistent with shell behavior
+                        std::sort(job_list.begin(), job_list.end(), [](const Job& a, const Job& b) {
+                            return a.id < b.id;
+                        });
                     } else waitpid(pid, nullptr, 0);
                 }
             } else std::cout << command << ": command not found" << std::endl;
         }
 
-        // --- RESTORE STREAMS FOR BUILTINS ---
         if (is_builtin) {
             std::cout.flush();
-            std::cerr.flush();
             dup2(original_stdout, STDOUT_FILENO);
             dup2(original_stderr, STDERR_FILENO);
-            close(original_stdout);
-            close(original_stderr);
+            close(original_stdout); close(original_stderr);
         }
 
         free(line);
