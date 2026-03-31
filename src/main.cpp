@@ -15,7 +15,14 @@
 
 namespace fs = std::filesystem;
 
-const std::vector<std::string> builtins = {"echo", "exit", "type", "pwd", "cd"};
+struct Job {
+    int id;
+    pid_t pid;
+    std::string cmd;
+};
+
+std::vector<Job> jobs;
+int job_id = 1;
 
 // --- UTILS ---
 
@@ -41,7 +48,6 @@ std::string get_path(const std::string& cmd) {
     return "";
 }
 
-// Tokenizer with quote support
 std::vector<std::string> tokenize(const std::string& s) {
     std::vector<std::string> tokens;
     std::string current;
@@ -65,6 +71,8 @@ std::vector<std::string> tokenize(const std::string& s) {
 }
 
 // --- BUILTINS ---
+
+const std::vector<std::string> builtins = {"echo", "exit", "type", "pwd", "cd"};
 
 bool handle_builtin(const std::vector<std::string>& args) {
     if (args.empty()) return false;
@@ -102,9 +110,28 @@ bool handle_builtin(const std::vector<std::string>& args) {
     return false;
 }
 
+// --- SIGCHLD HANDLER ---
+
+void handle_sigchld(int) {
+    int status;
+    pid_t pid;
+
+    while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        for (auto it = jobs.begin(); it != jobs.end(); ++it) {
+            if (it->pid == pid) {
+                std::cout << "\n[" << it->id << "]+  Done                 "
+                          << it->cmd << std::endl;
+                std::cout << "$ " << std::flush; // restore prompt
+                jobs.erase(it);
+                break;
+            }
+        }
+    }
+}
+
 // --- PIPELINE ENGINE ---
 
-void run_pipeline(const std::string& line, bool is_background, int& job_id) {
+void run_pipeline(const std::string& line, bool is_background) {
     std::vector<std::string> stages;
     std::stringstream ss(line);
     std::string seg;
@@ -127,15 +154,8 @@ void run_pipeline(const std::string& line, bool is_background, int& job_id) {
         pid_t pid = fork();
 
         if (pid == 0) {
-            // CHILD
-
-            if (i > 0) {
-                dup2(prev_read_fd, STDIN_FILENO);
-            }
-
-            if (i < n - 1) {
-                dup2(fds[1], STDOUT_FILENO);
-            }
+            if (i > 0) dup2(prev_read_fd, STDIN_FILENO);
+            if (i < n - 1) dup2(fds[1], STDOUT_FILENO);
 
             if (prev_read_fd != -1) close(prev_read_fd);
             if (i < n - 1) {
@@ -158,8 +178,6 @@ void run_pipeline(const std::string& line, bool is_background, int& job_id) {
 
             exit(1);
         } else {
-            // PARENT
-
             pids.push_back(pid);
 
             if (prev_read_fd != -1) close(prev_read_fd);
@@ -172,11 +190,10 @@ void run_pipeline(const std::string& line, bool is_background, int& job_id) {
     }
 
     if (is_background) {
+        jobs.push_back({job_id, pids.back(), line});
         std::cout << "[" << job_id++ << "] " << pids.back() << std::endl;
     } else {
-        for (pid_t p : pids) {
-            waitpid(p, nullptr, 0);
-        }
+        for (pid_t p : pids) waitpid(p, nullptr, 0);
     }
 
     std::cout << std::flush;
@@ -187,10 +204,7 @@ void run_pipeline(const std::string& line, bool is_background, int& job_id) {
 int main() {
     std::cout << std::unitbuf;
 
-    // Prevent zombie processes
-    signal(SIGCHLD, SIG_IGN);
-
-    int job_id = 1;
+    signal(SIGCHLD, handle_sigchld);
 
     while (true) {
         char* line = readline("$ ");
@@ -204,7 +218,6 @@ int main() {
         add_history(line);
         std::string input(line);
 
-        // Detect background job
         bool is_background = false;
         if (!input.empty() && input.back() == '&') {
             is_background = true;
@@ -213,7 +226,7 @@ int main() {
         }
 
         if (input.find('|') != std::string::npos) {
-            run_pipeline(input, is_background, job_id);
+            run_pipeline(input, is_background);
         } else {
             std::vector<std::string> args = tokenize(input);
             if (args.empty()) {
@@ -242,11 +255,11 @@ int main() {
                     exit(1);
                 } else {
                     if (is_background) {
+                        jobs.push_back({job_id, pid, input});
                         std::cout << "[" << job_id++ << "] " << pid << std::endl;
                     } else {
                         waitpid(pid, nullptr, 0);
                     }
-                    std::cout << std::flush;
                 }
             }
         }
