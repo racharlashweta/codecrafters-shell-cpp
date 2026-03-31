@@ -5,10 +5,12 @@
 #include <sstream>
 #include <filesystem>
 #include <cstdlib>
+#include <sys/wait.h>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 
-// --- NEW: The Tokenizer ---
+// Helper to parse arguments handling single quotes
 std::vector<std::string> parse_arguments(const std::string& input) {
     std::vector<std::string> args;
     std::string current_arg;
@@ -16,7 +18,6 @@ std::vector<std::string> parse_arguments(const std::string& input) {
 
     for (size_t i = 0; i < input.length(); ++i) {
         char c = input[i];
-
         if (c == '\'' && !in_single_quotes) {
             in_single_quotes = true;
         } else if (c == '\'' && in_single_quotes) {
@@ -34,7 +35,7 @@ std::vector<std::string> parse_arguments(const std::string& input) {
     return args;
 }
 
-// Keep your get_path function...
+// Helper to find executable in PATH
 std::string get_path(std::string command) {
     char* path_env = std::getenv("PATH");
     if (!path_env) return "";
@@ -42,13 +43,20 @@ std::string get_path(std::string command) {
     std::string path;
     while (std::getline(ss, path, ':')) {
         fs::path p = fs::path(path) / command;
-        if (fs::exists(p)) return p.string();
+        if (fs::exists(p)) {
+            auto perms = fs::status(p).permissions();
+            if ((perms & fs::perms::owner_exec) != fs::perms::none) {
+                return p.string();
+            }
+        }
     }
     return "";
 }
 
 int main() {
     std::cout << std::unitbuf;
+    std::cerr << std::unitbuf;
+
     std::set<std::string> builtins = {"exit", "echo", "type", "pwd", "cd"};
 
     while (true) {
@@ -75,29 +83,44 @@ int main() {
         }
         else if (command == "cd") {
             std::string path = args.size() > 1 ? args[1] : "";
-            if (path == "~") path = std::getenv("HOME");
-            if (fs::exists(path) && fs::is_directory(path)) fs::current_path(path);
-            else std::cout << "cd: " << path << ": No such file or directory\n";
+            if (path == "~") {
+                char* home = std::getenv("HOME");
+                if (home) path = std::string(home);
+            }
+            if (fs::exists(path) && fs::is_directory(path)) {
+                fs::current_path(path);
+            } else {
+                std::cout << "cd: " << path << ": No such file or directory\n";
+            }
         }
         else if (command == "type") {
             std::string target = args[1];
-            if (builtins.count(target)) std::cout << target << " is a shell builtin\n";
-            else {
+            if (builtins.count(target)) {
+                std::cout << target << " is a shell builtin\n";
+            } else {
                 std::string p = get_path(target);
                 if (!p.empty()) std::cout << target << " is " << p << "\n";
                 else std::cout << target << ": not found\n";
             }
         } 
         else {
+            // --- FIXED EXTERNAL PROGRAM EXECUTION ---
             std::string full_path = get_path(command);
             if (!full_path.empty()) {
-                // For external programs with quoted args, system() is tricky.
-                // Re-constructing the string carefully:
-                std::string exec_cmd = full_path;
-                for (size_t i = 1; i < args.size(); ++i) {
-                    exec_cmd += " \"" + args[i] + "\""; 
+                pid_t pid = fork();
+                if (pid == 0) { // Child process
+                    // Prepare arguments for execvp
+                    std::vector<char*> c_args;
+                    for (auto& arg : args) {
+                        c_args.push_back(&arg[0]);
+                    }
+                    c_args.push_back(nullptr);
+                    
+                    execvp(c_args[0], c_args.data());
+                    exit(1); // Exit if exec fails
+                } else { // Parent process
+                    wait(nullptr);
                 }
-                std::system(exec_cmd.c_str());
             } else {
                 std::cout << command << ": command not found\n";
             }
