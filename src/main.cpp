@@ -30,8 +30,8 @@ int main() {
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
-    // Update your builtin list
-    std::set<std::string> builtins = {"exit", "echo", "type", "pwd"};
+    // Add 'cd' to the builtins
+    std::set<std::string> builtins = {"exit", "echo", "type", "pwd", "cd"};
 
     while (true) {
         std::cout << "$ " << std::flush;
@@ -49,9 +49,25 @@ int main() {
         else if (command == "echo") {
             std::cout << argument << "\n";
         } 
-        // NEW: Handle the pwd builtin
         else if (command == "pwd") {
             std::cout << fs::current_path().string() << "\n";
+        }
+        // NEW: Handle the cd builtin
+        else if (command == "cd") {
+            std::string target_path = argument;
+            
+            // Handle tilde (home directory)
+            if (target_path == "~") {
+                char* home = std::getenv("HOME");
+                if (home) target_path = std::string(home);
+            }
+
+            // Check if directory exists before changing
+            if (fs::exists(target_path) && fs::is_directory(target_path)) {
+                fs::current_path(target_path);
+            } else {
+                std::cout << "cd: " << argument << ": No such file or directory" << std::endl;
+            }
         }
         else if (command == "type") {
             if (builtins.count(argument)) {
