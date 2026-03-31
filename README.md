@@ -1,34 +1,20 @@
-[![progress-banner](https://backend.codecrafters.io/progress/shell/b3fa9298-2503-4dbb-b8fd-13f247134ee8)](https://app.codecrafters.io/users/codecrafters-bot?r=2qF)
+cat <<EOF > README.md
+# Custom POSIX-Compliant Shell (C++17) 🐚
 
-This is a starting point for C++ solutions to the
-["Build Your Own Shell" Challenge](https://app.codecrafters.io/courses/shell/overview).
+A functional Linux shell built from the ground up, designed to handle command execution, process management, and system-level environment resolution.
 
-In this challenge, you'll build your own POSIX compliant shell that's capable of
-interpreting shell commands, running external programs and builtin commands like
-cd, pwd, echo and more. Along the way, you'll learn about shell command parsing,
-REPLs, builtin commands, and more.
+### 🚀 Key Features
+* **REPL Architecture:** Implemented a robust Read-Eval-Print Loop.
+* **Command Execution:** Supports built-in commands (cd, echo, pwd, type, exit) and external binary execution.
+* **Advanced Input:** Integrated the GNU Readline library for command history and navigation.
+* **PATH Resolution:** Custom logic to locate executables within the Linux filesystem.
 
-**Note**: If you're viewing this repo on GitHub, head over to
-[codecrafters.io](https://codecrafters.io) to try the challenge.
+### 🛠 Tech Stack
+* **Language:** C++17
+* **Tools:** CMake, GNU Readline, Linux System Calls
+* **Environment:** Ubuntu 24.04 (via GitHub Codespaces)
+EOF
 
-# Passing the first stage
-
-The entry point for your `shell` implementation is in `src/main.cpp`. Study and
-uncomment the relevant code, then run the command below to execute the tests on
-our servers:
-
-```sh
-codecrafters submit
-```
-
-Time to move on to the next stage!
-
-# Stage 2 & beyond
-
-Note: This section is for stages 2 and beyond.
-
-1. Ensure you have `cmake` installed locally
-1. Run `./your_program.sh` to run your program, which is implemented in
-   `src/main.cpp`.
-1. Run `codecrafters submit` to submit your solution to CodeCrafters. Test
-   output will be streamed to your terminal.
+git add README.md
+git commit -m "docs: update README with professional project summary"
+git push origin main
