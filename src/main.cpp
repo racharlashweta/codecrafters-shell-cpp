@@ -31,14 +31,10 @@ const std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "
 std::string format_cmd_for_display(std::string cmd, std::string status) {
     if (status == "Done") {
         size_t last_amp = cmd.find_last_of('&');
-        if (last_amp != std::string::npos) {
-            cmd.erase(last_amp);
-        }
+        if (last_amp != std::string::npos) cmd.erase(last_amp);
     }
     size_t last_pos = cmd.find_last_not_of(" \t\n\r");
-    if (last_pos != std::string::npos) {
-        cmd.erase(last_pos + 1);
-    }
+    if (last_pos != std::string::npos) cmd.erase(last_pos + 1);
     return cmd;
 }
 
@@ -66,6 +62,55 @@ void reap_finished_jobs() {
     }
     job_list = active_jobs;
 }
+
+// --- COMPLETION HELPERS ---
+
+std::set<std::string> get_all_matches(const std::string& prefix) {
+    std::set<std::string> matches;
+    for (const auto& b : builtins_list) if (b.find(prefix) == 0) matches.insert(b);
+    char* path_env = std::getenv("PATH");
+    if (path_env) {
+        std::stringstream ss(path_env);
+        std::string dir;
+        while (std::getline(ss, dir, ':')) {
+            if (dir.empty() || !fs::exists(dir)) continue;
+            try {
+                for (const auto& entry : fs::directory_iterator(dir)) {
+                    std::string name = entry.path().filename().string();
+                    if (name.find(prefix) == 0) matches.insert(name);
+                }
+            } catch (...) { continue; }
+        }
+    }
+    return matches;
+}
+
+char* command_generator(const char* text, int state) {
+    static std::vector<std::string> matches;
+    static size_t idx;
+    if (!state) {
+        matches.clear();
+        idx = 0;
+        std::set<std::string> m_set = get_all_matches(text);
+        for (const auto& s : m_set) matches.push_back(s);
+    }
+    if (idx < matches.size()) return strdup(matches[idx++].c_str());
+    return nullptr;
+}
+
+char** my_completion(const char* text, int start, int end) {
+    if (start == 0) {
+        rl_attempted_completion_over = 1;
+        std::set<std::string> m_set = get_all_matches(text);
+        if (m_set.empty()) { rl_ding(); return nullptr; }
+        rl_completion_append_character = (m_set.size() == 1) ? ' ' : '\0';
+        return rl_completion_matches(text, command_generator);
+    }
+    rl_attempted_completion_over = 0; // Fallback to filename completion for arguments
+    return nullptr;
+}
+
+// --- REST OF THE SHELL (PARSING/EXECUTION) ---
 
 std::vector<std::string> parse_arguments(const std::string& input) {
     std::vector<std::string> args;
@@ -107,6 +152,8 @@ std::string get_full_path(const std::string& cmd) {
 
 int main() {
     std::cout << std::unitbuf;
+    rl_attempted_completion_function = my_completion;
+    
     while (true) {
         reap_finished_jobs();
         char* line = readline("$ ");
