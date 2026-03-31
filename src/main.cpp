@@ -17,7 +17,6 @@
 
 namespace fs = std::filesystem;
 
-// --- DATA STRUCTURES ---
 struct Job {
     int id;
     pid_t pid;
@@ -28,7 +27,6 @@ struct Job {
 std::vector<Job> job_list;
 const std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
-// --- HELPERS ---
 std::string format_cmd_for_display(std::string cmd, std::string status) {
     std::string result = cmd;
     if (status == "Done") {
@@ -69,7 +67,6 @@ void reap_finished_jobs() {
     job_list = active;
 }
 
-// --- AUTOCOMPLETE ENGINE ---
 char* command_generator(const char* text, int state) {
     static std::vector<std::string> matches;
     static size_t idx;
@@ -78,10 +75,8 @@ char* command_generator(const char* text, int state) {
         idx = 0;
         std::string prefix(text);
 
-        // 1. Check Built-ins
         for (const auto& b : builtins_list) if (b.find(prefix) == 0) matches.push_back(b);
-
-        // 2. Check PATH
+        
         char* path_env = std::getenv("PATH");
         if (path_env) {
             std::stringstream ss(path_env);
@@ -97,17 +92,16 @@ char* command_generator(const char* text, int state) {
             }
         }
 
-        // 3. Check Current Directory (Crucial for 'du rat/')
         try {
             for (const auto& entry : fs::directory_iterator(".")) {
                 std::string name = entry.path().filename().string();
+                if (name == "." || name == "..") continue;
                 if (name.find(prefix) == 0) {
                     if (fs::is_directory(entry.path())) name += "/";
                     matches.push_back(name);
                 }
             }
         } catch (...) {}
-
         std::sort(matches.begin(), matches.end());
         matches.erase(std::unique(matches.begin(), matches.end()), matches.end());
     }
@@ -117,21 +111,14 @@ char* command_generator(const char* text, int state) {
 
 char** my_completion(const char* text, int start, int end) {
     rl_attempted_completion_over = 1; 
-    rl_completion_append_character = ' '; // Reset to space by default
-
+    rl_completion_append_character = ' '; 
     char** matches = rl_completion_matches(text, command_generator);
-
-    // FIX FOR #LC6 & #BF8: Unique Directory Match
     if (matches && matches[0] != nullptr && matches[1] == nullptr) {
-        std::string match_str(matches[0]);
-        if (!match_str.empty() && match_str.back() == '/') {
-            rl_completion_append_character = '\0'; // No trailing space for dirs
-        }
+        if (std::string(matches[0]).back() == '/') rl_completion_append_character = '\0';
     }
     return matches;
 }
 
-// --- PARSER ---
 std::vector<std::string> parse_args(const std::string& input) {
     std::vector<std::string> args;
     std::string current;
@@ -159,7 +146,6 @@ std::vector<std::string> parse_args(const std::string& input) {
     return args;
 }
 
-// --- EXECUTION ---
 void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_input) {
     int out_fd = -1, err_fd = -1, saved_out = dup(STDOUT_FILENO), saved_err = dup(STDERR_FILENO);
     std::vector<std::string> clean;
@@ -169,7 +155,6 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
         else if (args[i] == ">>" || args[i] == "1>>") { target = 1; append = true; }
         else if (args[i] == "2>") target = 2;
         else if (args[i] == "2>>") { target = 2; append = true; }
-
         if (target != -1 && i + 1 < args.size()) {
             int f = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
             int fd = open(args[++i].c_str(), f, 0644);
@@ -177,7 +162,6 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
         } else clean.push_back(args[i]);
     }
     if (clean.empty()) return;
-
     if (out_fd != -1) { dup2(out_fd, STDOUT_FILENO); close(out_fd); }
     if (err_fd != -1) { dup2(err_fd, STDERR_FILENO); close(err_fd); }
 
@@ -214,8 +198,7 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
                 int id = job_list.empty() ? 1 : job_list.back().id + 1;
                 std::cout << "[" << id << "] " << pid << std::endl; 
                 job_list.push_back({id, pid, raw_input, "Running"}); 
-            }
-            else waitpid(pid, nullptr, 0);
+            } else waitpid(pid, nullptr, 0);
         }
     }
     dup2(saved_out, STDOUT_FILENO); dup2(saved_err, STDERR_FILENO); close(saved_out); close(saved_err);
