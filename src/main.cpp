@@ -62,36 +62,50 @@ char* command_generator(const char* text, int state) {
     return nullptr;
 }
 
-// --- UPDATED COMPLETION HOOK WITH BELL ---
-char** my_completion(const char* text, int start, int end) {
-    char** matches = nullptr;
+// --- DISPLAY HOOK (Stage #WH6) ---
+void display_matches(char** matches, int num_matches, int max_length) {
+    std::cout << "\n";
+    std::vector<std::string> sorted_matches;
+    for (int i = 1; i <= num_matches; ++i) sorted_matches.push_back(matches[i]);
+    std::sort(sorted_matches.begin(), sorted_matches.end());
+    for (size_t i = 0; i < sorted_matches.size(); ++i) {
+        std::cout << sorted_matches[i] << (i == sorted_matches.size() - 1 ? "" : "  ");
+    }
+    std::cout << "\n";
+    rl_on_new_line();
+    rl_redisplay();
+}
 
+// --- MASTER COMPLETION HOOK ---
+char** my_completion(const char* text, int start, int end) {
+    // RESET FLAGS for every new tab press
+    rl_completion_suppress_append = 0;
+    rl_completion_append_character = ' ';
+
+    char** matches = nullptr;
     if (start == 0) {
         rl_attempted_completion_over = 1;
         matches = rl_completion_matches(text, command_generator);
+        // Stage #WT6: No space if multiple commands share a prefix
+        if (matches && matches[0] && matches[1] && matches[2]) {
+            rl_completion_append_character = '\0';
+        }
     } else {
         rl_attempted_completion_over = 1; 
         matches = rl_completion_matches(text, rl_filename_completion_function);
-    }
-
-    // STAGE #VS5 FIX: If no matches found, trigger the bell
-    if (!matches || !matches[0]) {
-        rl_ding(); // This sends \x07 to stdout
-        return nullptr;
-    }
-
-    // Handle trailing slash vs space logic from previous stages
-    if (matches && matches[0] && !matches[1]) {
-        std::string path(matches[0]);
-        if (fs::exists(path) && fs::is_directory(path)) {
-            rl_completion_append_character = '/';
-            rl_completion_suppress_append = 1; 
-        } else {
-            rl_completion_append_character = ' ';
-            rl_completion_suppress_append = 0;
+        // Stage #LC6: Add slash instead of space for directories
+        if (matches && matches[0] && !matches[1]) {
+            if (fs::exists(matches[0]) && fs::is_directory(matches[0])) {
+                rl_completion_append_character = '/';
+                rl_completion_suppress_append = 1; 
+            }
         }
     }
 
+    if (!matches || !matches[0]) {
+        rl_ding(); // Stage #VS5 / #QM8: Bell on missing
+        return nullptr;
+    }
     return matches;
 }
 
@@ -141,9 +155,9 @@ std::string get_full_path(std::string cmd) {
 
 int main() {
     std::cout << std::unitbuf;
-    
-    // Readline Global Config
     rl_attempted_completion_function = my_completion;
+    rl_completion_display_matches_hook = display_matches;
+    rl_variable_bind("show-all-if-ambiguous", "off"); 
     rl_variable_bind("bell-style", "audible");
 
     while (true) {
@@ -157,13 +171,81 @@ int main() {
         free(line);
         if (args.empty()) continue;
 
-        // --- EXECUTION & REDIRECTION LOGIC ---
-        // (Keep your existing redirection/builtin/exec logic here)
-        // Ensure you're handling builtins like 'exit', 'echo', 'cd', etc.
-        std::string command = args[0];
+        // Redirection logic
+        std::string out_f = "", err_f = "";
+        bool out_app = false, err_app = false;
+        int redirect_idx = -1;
+        for (int i = 0; i < (int)args.size(); ++i) {
+            if (args[i] == ">" || args[i] == "1>") { out_f = args[i+1]; out_app = false; redirect_idx = i; break; }
+            else if (args[i] == ">>" || args[i] == "1>>") { out_f = args[i+1]; out_app = true; redirect_idx = i; break; }
+            else if (args[i] == "2>") { err_f = args[i+1]; err_app = false; redirect_idx = i; break; }
+            else if (args[i] == "2>>") { err_f = args[i+1]; err_app = true; redirect_idx = i; break; }
+        }
+        std::vector<std::string> cmd_args = args;
+        if (redirect_idx != -1) cmd_args.erase(cmd_args.begin() + redirect_idx, cmd_args.end());
+
+        if (!out_f.empty()) {
+            fs::path p(out_f);
+            if (p.has_parent_path()) fs::create_directories(p.parent_path());
+            std::ofstream(out_f, out_app ? std::ios::app : std::ios::out);
+        }
+        if (!err_f.empty()) {
+            fs::path p(err_f);
+            if (p.has_parent_path()) fs::create_directories(p.parent_path());
+            std::ofstream(err_f, err_app ? std::ios::app : std::ios::out);
+        }
+
+        std::string command = cmd_args[0];
         if (command == "exit") return 0;
-        else if (command == "pwd") std::cout << fs::current_path().string() << "\n";
-        // ... rest of execution logic ...
+        else if (command == "echo") {
+            std::ostream* out = &std::cout;
+            std::ofstream f_out;
+            if (!out_f.empty()) {
+                f_out.open(out_f, out_app ? std::ios::app : std::ios::out);
+                out = &f_out;
+            }
+            for (size_t i = 1; i < cmd_args.size(); ++i) 
+                *out << cmd_args[i] << (i == cmd_args.size() - 1 ? "" : " ");
+            *out << std::endl; // Flush output immediately
+        }
+        else if (command == "type") {
+            std::string target = cmd_args[1];
+            if (std::find(builtins_list.begin(), builtins_list.end(), target) != builtins_list.end())
+                std::cout << target << " is a shell builtin" << std::endl;
+            else {
+                std::string p = get_full_path(target);
+                if (!p.empty()) std::cout << target << " is " << p << std::endl;
+                else std::cout << target << ": not found" << std::endl;
+            }
+        }
+        else if (command == "pwd") std::cout << fs::current_path().string() << std::endl;
+        else if (command == "cd") {
+            std::string path = cmd_args.size() > 1 ? cmd_args[1] : "";
+            if (path == "~") path = std::getenv("HOME");
+            if (fs::exists(path)) fs::current_path(path);
+            else std::cout << "cd: " << path << ": No such file or directory" << std::endl;
+        }
+        else {
+            std::string full_path = get_full_path(command);
+            if (!full_path.empty()) {
+                pid_t pid = fork();
+                if (pid == 0) {
+                    if (!out_f.empty()) {
+                        int fd = open(out_f.c_str(), O_WRONLY | O_CREAT | (out_app ? O_APPEND : O_TRUNC), 0644);
+                        dup2(fd, STDOUT_FILENO); close(fd);
+                    }
+                    if (!err_f.empty()) {
+                        int fd = open(err_f.c_str(), O_WRONLY | O_CREAT | (err_app ? O_APPEND : O_TRUNC), 0644);
+                        dup2(fd, STDERR_FILENO); close(fd);
+                    }
+                    std::vector<char*> c_args;
+                    for (auto& arg : cmd_args) c_args.push_back(&arg[0]);
+                    c_args.push_back(nullptr);
+                    execvp(c_args[0], c_args.data());
+                    exit(1);
+                } else wait(nullptr);
+            } else std::cout << command << ": command not found" << std::endl;
+        }
     }
     return 0;
 }
