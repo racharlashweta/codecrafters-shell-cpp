@@ -117,9 +117,6 @@ char* command_generator(const char* text, int state) {
 char** my_completion(const char* text, int start, int end) {
     if (start == 0) {
         rl_attempted_completion_over = 1;
-        std::set<std::string> m_set = get_all_matches(text);
-        if (m_set.empty()) { rl_ding(); return nullptr; }
-        rl_completion_append_character = (m_set.size() == 1) ? ' ' : '\0';
         return rl_completion_matches(text, command_generator);
     }
     rl_attempted_completion_over = 0;
@@ -173,9 +170,12 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
     if (cmd == "echo") {
         for (size_t i = 1; i < clean_args.size(); ++i) {
             std::string word = clean_args[i];
-            // Strip surrounding quotes so we don't print ""Maria says Error""
-            if (word.size() >= 2 && ((word.front() == '"' && word.back() == '"') || (word.front() == '\'' && word.back() == '\''))) {
-                word = word.substr(1, word.size() - 2);
+            // Fix for Stage #UN3: Strip quotes from arguments
+            if (word.size() >= 2) {
+                if ((word.front() == '"' && word.back() == '"') || 
+                    (word.front() == '\'' && word.back() == '\'')) {
+                    word = word.substr(1, word.size() - 2);
+                }
             }
             std::cout << word << (i == clean_args.size() - 1 ? "" : " ");
         }
@@ -193,12 +193,9 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
             if (waitpid(job.pid, &status, WNOHANG) > 0) job.status = "Done";
         }
         for (size_t i = 0; i < job_list.size(); ++i) {
-            char m = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
-            std::cout << "[" << job_list[i].id << "]" << m << "  " << std::left << std::setw(24) << job_list[i].status << format_cmd_for_display(job_list[i].command, job_list[i].status) << std::endl;
+            char marker = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
+            std::cout << "[" << job_list[i].id << "]" << marker << "  " << std::left << std::setw(24) << job_list[i].status << format_cmd_for_display(job_list[i].command, job_list[i].status) << std::endl;
         }
-        std::vector<Job> active;
-        for (const auto& j : job_list) if (j.status == "Running") active.push_back(j);
-        job_list = active;
     }
     else if (cmd == "type") {
         if (clean_args.size() > 1) {
@@ -269,7 +266,7 @@ int main() {
             std::vector<std::string> left_args(args.begin(), pipe_it);
             std::vector<std::string> right_args(pipe_it + 1, args.end());
             int pfd[2];
-            if (pipe(pfd) == -1) continue;
+            pipe(pfd);
             pid_t p1 = fork();
             if (p1 == 0) { dup2(pfd[1], STDOUT_FILENO); close(pfd[0]); close(pfd[1]); execute_command(left_args, false, ""); exit(0); }
             pid_t p2 = fork();
