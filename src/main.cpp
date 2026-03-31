@@ -18,7 +18,6 @@
 namespace fs = std::filesystem;
 
 // --- DATA STRUCTURES ---
-
 struct Job {
     int id;
     pid_t pid;
@@ -30,7 +29,6 @@ std::vector<Job> job_list;
 const std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
 // --- HELPERS ---
-
 std::string format_cmd_for_display(std::string cmd, std::string status) {
     std::string result = cmd;
     if (status == "Done") {
@@ -74,15 +72,12 @@ void reap_finished_jobs() {
             char marker = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
             std::cout << "[" << job_list[i].id << "]" << marker << "  Done                    " 
                       << format_cmd_for_display(job_list[i].command, "Done") << std::endl;
-        } else {
-            active.push_back(job_list[i]);
-        }
+        } else { active.push_back(job_list[i]); }
     }
     job_list = active;
 }
 
 // --- COMPLETION ---
-
 char* command_generator(const char* text, int state) {
     static std::vector<std::string> matches;
     static size_t idx;
@@ -117,52 +112,35 @@ char** my_completion(const char* text, int start, int end) {
 }
 
 // --- PARSER ---
-
 std::vector<std::string> parse_args(const std::string& input) {
     std::vector<std::string> args;
     std::string current;
     bool in_double_quotes = false;
     bool in_single_quotes = false;
-
     for (size_t i = 0; i < input.length(); ++i) {
         char c = input[i];
-
-        // Backslash outside of single quotes
         if (c == '\\' && !in_single_quotes) {
             if (i + 1 < input.length()) {
                 char next = input[i + 1];
                 if (in_double_quotes) {
-                    // Inside double quotes, \ only escapes specific characters
                     if (next == '$' || next == '`' || next == '"' || next == '\\' || next == '\n') {
-                        current += next;
-                        i++;
-                    } else {
-                        current += c;
-                    }
-                } else {
-                    // Outside quotes, \ always escapes the next char
-                    current += next;
-                    i++;
-                }
+                        current += next; i++;
+                    } else { current += c; }
+                } else { current += next; i++; }
             }
             continue;
         }
-
         if (c == '"' && !in_single_quotes) { in_double_quotes = !in_double_quotes; continue; }
         if (c == '\'' && !in_double_quotes) { in_single_quotes = !in_single_quotes; continue; }
-
         if (std::isspace(c) && !in_double_quotes && !in_single_quotes) {
             if (!current.empty()) { args.push_back(current); current.clear(); }
-        } else {
-            current += c;
-        }
+        } else { current += c; }
     }
     if (!current.empty()) args.push_back(current);
     return args;
 }
 
 // --- EXECUTION ---
-
 void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_input) {
     int out_fd = -1, err_fd = -1;
     int saved_stdout = dup(STDOUT_FILENO);
@@ -198,23 +176,15 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
     else if (cmd == "pwd") { std::cout << fs::current_path().string() << std::endl; }
     else if (cmd == "cd") {
         std::string target = (clean_args.size() > 1) ? clean_args[1] : "~";
-        // --- TILDE EXPANSION ---
-        if (target == "~") {
-            char* home = std::getenv("HOME");
-            target = home ? home : "/";
-        } else if (target.find("~/") == 0) {
-            char* home = std::getenv("HOME");
-            target = (home ? std::string(home) : "") + target.substr(1);
-        }
-        if (chdir(target.c_str()) != 0) 
-            std::cerr << "cd: " << clean_args[1] << ": No such file or directory" << std::endl;
+        if (target == "~") { char* h = std::getenv("HOME"); target = h ? h : "/"; }
+        else if (target.find("~/") == 0) { char* h = std::getenv("HOME"); target = (h ? std::string(h) : "") + target.substr(1); }
+        if (chdir(target.c_str()) != 0) std::cerr << "cd: " << clean_args[1] << ": No such file or directory" << std::endl;
     }
     else if (cmd == "jobs") {
         for (auto& j : job_list) { int s; if (waitpid(j.pid, &s, WNOHANG) > 0) j.status = "Done"; }
         for (size_t i = 0; i < job_list.size(); ++i) {
             char m = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
-            std::cout << "[" << job_list[i].id << "]" << m << "  " << std::left << std::setw(24) 
-                      << job_list[i].status << format_cmd_for_display(job_list[i].command, job_list[i].status) << std::endl;
+            std::cout << "[" << job_list[i].id << "]" << m << "  " << std::left << std::setw(24) << job_list[i].status << format_cmd_for_display(job_list[i].command, job_list[i].status) << std::endl;
         }
         std::vector<Job> next;
         for (const auto& j : job_list) if (j.status == "Running") next.push_back(j);
@@ -255,17 +225,14 @@ void execute_command(std::vector<std::string> args, bool is_bg, std::string raw_
 int main() {
     std::cout << std::unitbuf;
     rl_attempted_completion_function = my_completion;
-
     while (true) {
         reap_finished_jobs();
         char* line = readline("$ ");
         if (!line) break;
         if (strlen(line) == 0) { free(line); continue; }
-
         add_history(line);
         std::string input(line);
         std::vector<std::string> args = parse_args(input);
-        
         bool is_bg = (!args.empty() && args.back() == "&");
         if (is_bg) args.pop_back();
 
@@ -273,12 +240,16 @@ int main() {
         if (pipe_it != args.end()) {
             std::vector<std::string> left(args.begin(), pipe_it), right(pipe_it + 1, args.end());
             int pfd[2]; pipe(pfd);
-            if (fork() == 0) { dup2(pfd[1], STDOUT_FILENO); close(pfd[0]); close(pfd[1]); execute_command(left, false, ""); exit(0); }
-            if (fork() == 0) { dup2(pfd[0], STDIN_FILENO); close(pfd[0]); close(pfd[1]); execute_command(right, false, ""); exit(0); }
+            if (fork() == 0) { // Left side (can be builtin or external)
+                dup2(pfd[1], STDOUT_FILENO); close(pfd[0]); close(pfd[1]);
+                execute_command(left, false, ""); exit(0);
+            }
+            if (fork() == 0) { // Right side (can be builtin or external)
+                dup2(pfd[0], STDIN_FILENO); close(pfd[0]); close(pfd[1]);
+                execute_command(right, false, ""); exit(0);
+            }
             close(pfd[0]); close(pfd[1]); wait(nullptr); wait(nullptr);
-        } else {
-            execute_command(args, is_bg, input);
-        }
+        } else { execute_command(args, is_bg, input); }
         free(line);
     }
     return 0;
