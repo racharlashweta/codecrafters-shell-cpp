@@ -17,26 +17,18 @@
 
 namespace fs = std::filesystem;
 
+// --- DATA STRUCTURES ---
 struct Job {
-    int id; pid_t pid; std::string command; mutable std::string status; 
+    int id;
+    pid_t pid;
+    std::string command;
+    mutable std::string status; 
 };
 
 std::vector<Job> job_list;
 const std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
-// --- REAPING & PATH HELPERS ---
-void reap_finished_jobs() {
-    std::vector<Job> active;
-    for (size_t i = 0; i < job_list.size(); ++i) {
-        int status;
-        if (waitpid(job_list[i].pid, &status, WNOHANG) > 0) {
-            char marker = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
-            std::cout << "[" << job_list[i].id << "]" << marker << "  Done                    " << job_list[i].command << std::endl;
-        } else { active.push_back(job_list[i]); }
-    }
-    job_list = active;
-}
-
+// --- HELPERS ---
 std::string get_full_path(const std::string& cmd) {
     if (cmd.find('/') != std::string::npos) return fs::exists(cmd) ? cmd : "";
     char* path_env = std::getenv("PATH");
@@ -52,7 +44,19 @@ std::string get_full_path(const std::string& cmd) {
     return "";
 }
 
-// --- COMPLETION LOGIC ---
+void reap_finished_jobs() {
+    std::vector<Job> active;
+    for (size_t i = 0; i < job_list.size(); ++i) {
+        int status;
+        if (waitpid(job_list[i].pid, &status, WNOHANG) > 0) {
+            char marker = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
+            std::cout << "[" << job_list[i].id << "]" << marker << "  Done                    " << job_list[i].command << std::endl;
+        } else { active.push_back(job_list[i]); }
+    }
+    job_list = active;
+}
+
+// --- AUTOCOMPLETE ENGINE ---
 char* command_generator(const char* text, int state) {
     static std::vector<std::string> matches;
     static size_t idx;
@@ -60,10 +64,8 @@ char* command_generator(const char* text, int state) {
         matches.clear(); idx = 0;
         std::string prefix(text);
 
-        // 1. Built-ins
         for (const auto& b : builtins_list) if (b.find(prefix) == 0) matches.push_back(b);
         
-        // 2. Current Directory (The fix for #LC6)
         try {
             for (const auto& entry : fs::directory_iterator(".")) {
                 std::string name = entry.path().filename().string();
@@ -93,42 +95,85 @@ char** my_completion(const char* text, int start, int end) {
     return matches;
 }
 
-// --- EXECUTION & PARSING (Condensed) ---
-void execute_command(std::vector<std::string> args, bool is_bg, std::string raw) {
+// --- PARSER ---
+std::vector<std::string> tokenize(std::string str) {
+    std::vector<std::string> tokens;
+    std::stringstream ss(str);
+    std::string temp;
+    while (ss >> temp) tokens.push_back(temp);
+    return tokens;
+}
+
+// --- EXECUTION ENGINE ---
+void execute_single_command(std::vector<std::string> args, bool is_bg, std::string raw) {
     if (args.empty()) return;
     const std::string& cmd = args[0];
 
+    // Built-ins
     if (cmd == "exit") exit(0);
+    else if (cmd == "pwd") std::cout << fs::current_path().string() << std::endl;
     else if (cmd == "cd") {
         std::string t = (args.size() > 1) ? args[1] : getenv("HOME");
         if (chdir(t.c_str()) != 0) std::cerr << "cd: " << t << ": No such file" << std::endl;
+    } else if (cmd == "echo") {
+        for (size_t i = 1; i < args.size(); ++i) std::cout << args[i] << (i == args.size()-1 ? "" : " ");
+        std::cout << std::endl;
     } else if (cmd == "jobs") {
         for (auto& j : job_list) { int s; if (waitpid(j.pid, &s, WNOHANG) > 0) j.status = "Done"; }
-        for (size_t i = 0; i < job_list.size(); ++i) {
-            char m = (i == job_list.size() - 1) ? '+' : (i == job_list.size() - 2 ? '-' : ' ');
-            std::cout << "[" << job_list[i].id << "]" << m << "  " << std::left << std::setw(24) << job_list[i].status << job_list[i].command << std::endl;
-        }
+        for (const auto& j : job_list) 
+            std::cout << "[" << j.id << "]  " << std::left << std::setw(10) << j.status << j.command << std::endl;
     } else {
+        // External Commands
         pid_t pid = fork();
         if (pid == 0) {
             std::string p = get_full_path(cmd);
-            std::vector<char*> ca; for (auto& a : args) ca.push_back(const_cast<char*>(a.c_str())); ca.push_back(nullptr);
-            execvp(p.c_str(), ca.data()); exit(1);
+            if (p.empty()) { std::cerr << cmd << ": command not found" << std::endl; exit(1); }
+            std::vector<char*> ca; 
+            for (auto& a : args) ca.push_back(const_cast<char*>(a.c_str()));
+            ca.push_back(nullptr);
+            execvp(p.c_str(), ca.data());
+            exit(1);
         } else {
-            if (is_bg) { 
+            if (is_bg) {
                 int id = job_list.empty() ? 1 : job_list.back().id + 1;
-                std::cout << "[" << id << "] " << pid << std::endl; 
-                job_list.push_back({id, pid, raw, "Running"}); 
+                std::cout << "[" << id << "] " << pid << std::endl;
+                job_list.push_back({id, pid, raw, "Running"});
             } else waitpid(pid, nullptr, 0);
         }
     }
 }
 
+void execute_pipeline(std::string line) {
+    std::vector<std::string> stages;
+    std::stringstream ss(line);
+    std::string segment;
+    while (std::getline(ss, segment, '|')) stages.push_back(segment);
+
+    int num_stages = stages.size();
+    int pipefds[2 * (num_stages - 1)];
+
+    for (int i = 0; i < num_stages - 1; i++) pipe(pipefds + i * 2);
+
+    for (int i = 0; i < num_stages; i++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            if (i > 0) dup2(pipefds[(i - 1) * 2], STDIN_FILENO);
+            if (i < num_stages - 1) dup2(pipefds[i * 2 + 1], STDOUT_FILENO);
+            for (int j = 0; j < 2 * (num_stages - 1); j++) close(pipefds[j]);
+            
+            execute_single_command(tokenize(stages[i]), false, "");
+            exit(0);
+        }
+    }
+
+    for (int i = 0; i < 2 * (num_stages - 1); i++) close(pipefds[i]);
+    for (int i = 0; i < num_stages; i++) wait(nullptr);
+}
+
+// --- MAIN LOOP ---
 int main() {
     std::cout << std::unitbuf;
-    
-    // SET BREAK CHARACTERS BEFORE STARTING
-    rl_basic_word_break_characters = " \t\n\"\\'`@$><=;|&{(";
+    rl_basic_word_break_characters = " \t\n\"\\'`@$><=;|&{("; 
     rl_attempted_completion_function = my_completion;
 
     while (true) {
@@ -139,15 +184,14 @@ int main() {
         add_history(line);
 
         std::string input(line);
-        std::stringstream ss(input);
-        std::string word;
-        std::vector<std::string> args;
-        while (ss >> word) args.push_back(word);
-
-        bool is_bg = (!args.empty() && args.back() == "&");
-        if (is_bg) args.pop_back();
-
-        execute_command(args, is_bg, input);
+        if (input.find('|') != std::string::npos) {
+            execute_pipeline(input);
+        } else {
+            std::vector<std::string> args = tokenize(input);
+            bool is_bg = (!args.empty() && args.back() == "&");
+            if (is_bg) args.pop_back();
+            execute_single_command(args, is_bg, input);
+        }
         free(line);
     }
     return 0;
