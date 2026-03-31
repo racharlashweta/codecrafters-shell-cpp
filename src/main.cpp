@@ -14,10 +14,8 @@
 
 namespace fs = std::filesystem;
 
-// --- GLOBALS ---
 const std::vector<std::string> builtins = {"echo", "exit", "type", "pwd", "cd"};
 
-// --- PATH RESOLUTION ---
 std::string get_path(const std::string& cmd) {
     if (cmd.find('/') != std::string::npos) return fs::exists(cmd) ? cmd : "";
     char* env = std::getenv("PATH");
@@ -33,7 +31,6 @@ std::string get_path(const std::string& cmd) {
     return "";
 }
 
-// --- TOKENIZER ---
 std::vector<std::string> tokenize(const std::string& s) {
     std::vector<std::string> tokens;
     std::stringstream ss(s);
@@ -42,7 +39,7 @@ std::vector<std::string> tokenize(const std::string& s) {
     return tokens;
 }
 
-// --- AUTOCOMPLETE ENGINE ---
+// Completion generator remains the same as previous working versions...
 char* generator(const char* text, int state) {
     static std::vector<std::string> matches;
     static size_t idx;
@@ -76,13 +73,8 @@ char** completion(const char* text, int start, int end) {
     return matches;
 }
 
-// --- EXECUTION LOGIC ---
 void exec_cmd_external(std::vector<std::string> args) {
     if (args.empty()) exit(0);
-    if (args[0] == "pwd") {
-        std::cout << fs::current_path().string() << std::endl;
-        exit(0);
-    }
     std::string full = get_path(args[0]);
     if (full.empty()) {
         std::cerr << args[0] << ": command not found" << std::endl;
@@ -95,7 +87,6 @@ void exec_cmd_external(std::vector<std::string> args) {
     exit(1);
 }
 
-// --- PIPELINE ENGINE (Fixed for #XK3) ---
 void run_pipeline(const std::string& line) {
     std::vector<std::string> stages;
     std::stringstream ss(line);
@@ -125,9 +116,7 @@ void run_pipeline(const std::string& line) {
             }
             
             std::vector<std::string> args = tokenize(stages[i]);
-            if (args.empty()) exit(0);
-
-            if (args[0] == "echo") {
+            if (!args.empty() && args[0] == "echo") {
                 for (size_t k = 1; k < args.size(); ++k) 
                     std::cout << args[k] << (k == args.size()-1 ? "" : " ");
                 std::cout << std::endl;
@@ -138,17 +127,16 @@ void run_pipeline(const std::string& line) {
 
         if (prev_read != -1) close(prev_read);
         if (i < n - 1) {
-            close(fds[1]); // CRITICAL: Parent must close write-end
+            close(fds[1]); 
             prev_read = fds[0];
         }
         pids.push_back(pid);
     }
 
-    // Wait for all stages to finish before printing prompt
     for (pid_t p : pids) waitpid(p, nullptr, 0);
+    std::cout << std::flush; // CRITICAL: Ensure grep's output hits the terminal before the prompt
 }
 
-// --- MAIN ---
 int main() {
     std::cout << std::unitbuf;
     rl_attempted_completion_function = completion;
@@ -174,16 +162,10 @@ int main() {
                 exit(0);
             } else {
                 pid_t pid = fork();
-                if (pid == 0) {
-                    if (args[0] == "echo") {
-                        for (size_t k = 1; k < args.size(); ++k) 
-                            std::cout << args[k] << (k == args.size()-1 ? "" : " ");
-                        std::cout << std::endl;
-                        exit(0);
-                    }
-                    exec_cmd_external(args);
-                } else {
+                if (pid == 0) exec_cmd_external(args);
+                else {
                     waitpid(pid, nullptr, 0);
+                    std::cout << std::flush;
                 }
             }
         }
