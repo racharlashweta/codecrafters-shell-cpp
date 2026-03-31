@@ -17,7 +17,6 @@
 
 namespace fs = std::filesystem;
 
-// The list of builtins used for both 'type' and 'tab completion'
 std::vector<std::string> builtins_list = {"echo", "exit", "type", "pwd", "cd", "jobs"};
 
 // --- TOKENIZER ---
@@ -65,7 +64,7 @@ std::string get_full_path(std::string cmd) {
     return "";
 }
 
-// --- COMPLETION GENERATORS ---
+// --- COMPLETION LOGIC ---
 std::vector<std::string> get_command_matches(const std::string& prefix) {
     std::set<std::string> matches;
     for (const auto& b : builtins_list) {
@@ -82,9 +81,8 @@ std::vector<std::string> get_command_matches(const std::string& prefix) {
                     std::string filename = entry.path().filename().string();
                     if (filename.compare(0, prefix.length(), prefix) == 0) {
                         auto perms = entry.status().permissions();
-                        if (fs::is_regular_file(entry) && (perms & fs::perms::owner_exec) != fs::perms::none) {
+                        if (fs::is_regular_file(entry) && (perms & fs::perms::owner_exec) != fs::perms::none)
                             matches.insert(filename);
-                        }
                     }
                 }
             } catch (...) { continue; }
@@ -159,7 +157,7 @@ int main() {
         free(line);
         if (args.empty()) continue;
 
-        // Detection for background jobs
+        // Background Job Detection
         bool is_background = false;
         if (args.back() == "&") {
             is_background = true;
@@ -180,23 +178,25 @@ int main() {
 
         if (cmd_args.empty()) continue;
 
-        // Pre-create redirection files
-        if (!out_f.empty()) std::ofstream(out_f, out_app ? std::ios::app : std::ios::out).close();
-        if (!err_f.empty()) std::ofstream(err_f, err_app ? std::ios::app : std::ios::out).close();
+        // Builtin redirection logic
+        auto get_stream = [&](std::ofstream &f) -> std::ostream* {
+            if (!out_f.empty()) {
+                f.open(out_f, out_app ? std::ios::app : std::ios::out);
+                return &f;
+            }
+            return &std::cout;
+        };
 
         std::string command = cmd_args[0];
 
-        // BUILTIN HANDLER
         if (command == "exit") return 0;
         else if (command == "echo") {
-            std::ostream* out = &std::cout; std::ofstream f;
-            if (!out_f.empty()) { f.open(out_f, out_app ? std::ios::app : std::ios::out); out = &f; }
+            std::ofstream f; std::ostream* out = get_stream(f);
             for (size_t i = 1; i < cmd_args.size(); ++i) *out << cmd_args[i] << (i == cmd_args.size()-1 ? "" : " ");
             *out << std::endl;
         }
         else if (command == "type") {
-            std::ostream* out = &std::cout; std::ofstream f;
-            if (!out_f.empty()) { f.open(out_f, out_app ? std::ios::app : std::ios::out); out = &f; }
+            std::ofstream f; std::ostream* out = get_stream(f);
             std::string target = cmd_args[1];
             if (std::find(builtins_list.begin(), builtins_list.end(), target) != builtins_list.end())
                 *out << target << " is a shell builtin" << std::endl;
@@ -207,8 +207,7 @@ int main() {
             }
         }
         else if (command == "pwd") {
-            std::ostream* out = &std::cout; std::ofstream f;
-            if (!out_f.empty()) { f.open(out_f, out_app ? std::ios::app : std::ios::out); out = &f; }
+            std::ofstream f; std::ostream* out = get_stream(f);
             *out << fs::current_path().string() << std::endl;
         }
         else if (command == "cd") {
@@ -218,14 +217,16 @@ int main() {
             else std::cout << "cd: " << path << ": No such file or directory" << std::endl;
         }
         else if (command == "jobs") {
-            // Stage #AF3: For now, produce no output
+            // Placeholder for next stages
         }
         else {
-            // EXTERNAL COMMANDS
+            // External Commands
             std::string full_path = get_full_path(command);
             if (!full_path.empty()) {
                 pid_t pid = fork();
                 if (pid == 0) {
+                    // CHILD: Inherits stdout/stderr by default. 
+                    // Only modify if redirection is explicitly requested.
                     if (!out_f.empty()) {
                         int fd = open(out_f.c_str(), O_WRONLY | O_CREAT | (out_app ? O_APPEND : O_TRUNC), 0644);
                         dup2(fd, STDOUT_FILENO); close(fd);
@@ -234,6 +235,7 @@ int main() {
                         int fd = open(err_f.c_str(), O_WRONLY | O_CREAT | (err_app ? O_APPEND : O_TRUNC), 0644);
                         dup2(fd, STDERR_FILENO); close(fd);
                     }
+                    
                     std::vector<char*> c_args;
                     for (auto& a : cmd_args) c_args.push_back(&a[0]);
                     c_args.push_back(nullptr);
@@ -243,6 +245,7 @@ int main() {
                     if (is_background) {
                         job_count++;
                         std::cout << "[" << job_count << "] " << pid << std::endl;
+                        // parent continues immediately, child keeps shell's stdout
                     } else {
                         waitpid(pid, nullptr, 0);
                     }
