@@ -1,14 +1,24 @@
-# Custom POSIX-Compliant Shell (C++17) 🐚
+Custom POSIX-Compliant Shell (C++20) 🐚
+A high-performance Linux shell built from the ground up, utilizing low-level system calls to handle complex process lifecycles, background job management, and I/O stream redirection.
 
-A functional Linux shell built from the ground up, designed to handle command execution, process management, and system-level environment resolution.
+🚀 Advanced Features
+Process Management (Fork/Exec): Unlike basic shells that use std::system, this implementation uses the fork() and execvp() pattern to manage child processes directly, providing full control over the process lifecycle.
 
-### 🚀 Key Features
-* **REPL Architecture:** Implemented a robust Read-Eval-Print Loop.
-* **Command Execution:** Supports built-in commands (cd, echo, pwd, type, exit) and external binary execution.
-* **Advanced Input:** Integrated the GNU Readline library for command history and navigation.
-* **PATH Resolution:** Custom logic to locate executables within the Linux filesystem.
+Asynchronous Job Control: Supports background execution via the & operator. Implemented a non-blocking "reaping" mechanism using waitpid with WNOHANG to track and clean up background tasks without interrupting the user experience.
 
-### 🛠 Tech Stack
-* **Language:** C++17
-* **Tools:** CMake, GNU Readline, Linux System Calls
-* **Environment:** Ubuntu 24.04 (via GitHub Codespaces)
+I/O Redirection: Direct manipulation of file descriptors (dup2) to support standard output redirection (>) and append mode (>>).
+
+Robust REPL Architecture: A persistent Read-Eval-Print Loop with integrated GNU Readline for command history, line editing, and interactive navigation.
+
+Custom Tokenization & Quoting: Hand-rolled parser for handling single (') and double (") quotes, including backslash escaping for complex string inputs.
+
+Built-in Command Suite: Native implementations of cd, echo, pwd, type, jobs, and exit.
+
+🛠 Tech Stack
+Language: C++20 (utilizing std::filesystem and modern container management).
+
+System Calls: fork, execvp, waitpid, dup2, open, chdir.
+
+Libraries: libreadline for professional CLI interaction.
+
+Environment: Development and testing on Ubuntu 24.04.
